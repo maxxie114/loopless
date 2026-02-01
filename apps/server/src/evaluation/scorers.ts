@@ -25,9 +25,10 @@ export function scoreTaskSuccess(
     ? run.metrics?.final_url?.includes(expectedUrl) 
     : true;
   
+  const passed = success && (urlMatch ?? false);
   return {
-    score: success && urlMatch ? 1.0 : 0.0,
-    passed: success && urlMatch,
+    score: passed ? 1.0 : 0.0,
+    passed,
     details: {
       success,
       final_url: run.metrics?.final_url,
