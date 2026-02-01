@@ -1,4 +1,6 @@
-import "dotenv/config";
+// Load env vars first, before any other imports
+import "./env.js";
+
 import express from "express";
 import cors from "cors";
 import runsRouter from "./api/runs.js";
@@ -35,11 +37,11 @@ async function main() {
     await ensureWeaveOps();
     logger.info("Weave initialized");
   }
-  try {
-    await getRedis();
-    logger.info("Redis connected");
-  } catch (e) {
-    logger.warn("Redis not available: %s", e);
+  const redis = await getRedis();
+  if (redis) {
+    logger.info("Redis Cloud connected");
+  } else {
+    logger.warn("Redis not available - using in-memory storage");
   }
 
   app.listen(config.SERVER_PORT, () => {

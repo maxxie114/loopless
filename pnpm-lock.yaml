@@ -13,6 +13,9 @@ importers:
       '@browserbasehq/stagehand':
         specifier: ^3.0.0
         version: 3.0.8(@cfworker/json-schema@4.1.1)(@opentelemetry/api@1.9.0)(deepmerge@4.3.1)(dotenv@16.6.1)(hono@4.11.7)(zod@3.25.76)
+      '@google/generative-ai':
+        specifier: ^0.21.0
+        version: 0.21.0
       '@loopless/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -384,6 +387,10 @@ packages:
     peerDependenciesMeta:
       '@modelcontextprotocol/sdk':
         optional: true
+
+  '@google/generative-ai@0.21.0':
+    resolution: {integrity: sha512-7XhUbtnlkSEZK15kN3t+tzIMxsbKm/dSkKBFalj+20NvPKe1kBY7mR2P7vuijEn+f06z5+A8bVGKO0v39cr6Wg==}
+    engines: {node: '>=18.0.0'}
 
   '@hono/node-server@1.19.9':
     resolution: {integrity: sha512-vHL6w3ecZsky+8P5MD+eFfaGTyCeOHUIFYMGpQGbrBTSmNNoxv0if69rEZ5giu36weC5saFuznL411gRX7bJDw==}
@@ -2653,6 +2660,8 @@ snapshots:
       - bufferutil
       - supports-color
       - utf-8-validate
+
+  '@google/generative-ai@0.21.0': {}
 
   '@hono/node-server@1.19.9(hono@4.11.7)':
     dependencies:

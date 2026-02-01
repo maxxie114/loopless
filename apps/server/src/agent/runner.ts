@@ -1,5 +1,6 @@
 import { Stagehand } from "@browserbasehq/stagehand";
 import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { config } from "../config.js";
 import {
   getMacro,
@@ -22,6 +23,7 @@ import {
   getHostname,
   getPathname,
 } from "../page-signature.js";
+import { analyzeRun, formatLearningReport } from "../evaluation/self-improve.js";
 import type {
   RunMeta,
   RunMetrics,
@@ -33,13 +35,37 @@ import type {
 } from "@loopless/shared";
 import { randomUUID } from "crypto";
 
-const openai = new OpenAI({
-  apiKey: config.OPENAI_API_KEY ?? config.WANDB_INFERENCE_API_KEY,
-  baseURL:
-    config.LLM_PROVIDER === "wandb_inference"
-      ? config.WANDB_INFERENCE_BASE_URL
-      : undefined,
-});
+// Lazy-init LLM clients
+let _openai: OpenAI | null = null;
+let _googleAI: GoogleGenerativeAI | null = null;
+
+function getOpenAI(): OpenAI {
+  if (!_openai) {
+    const apiKey = config.OPENAI_API_KEY ?? config.WANDB_INFERENCE_API_KEY;
+    if (!apiKey) {
+      throw new Error("OPENAI_API_KEY or WANDB_INFERENCE_API_KEY is required");
+    }
+    _openai = new OpenAI({
+      apiKey,
+      baseURL:
+        config.LLM_PROVIDER === "wandb_inference"
+          ? config.WANDB_INFERENCE_BASE_URL
+          : undefined,
+    });
+  }
+  return _openai;
+}
+
+function getGoogleAI(): GoogleGenerativeAI {
+  if (!_googleAI) {
+    const apiKey = config.GOOGLE_API_KEY;
+    if (!apiKey) {
+      throw new Error("GOOGLE_API_KEY is required for Gemini models");
+    }
+    _googleAI = new GoogleGenerativeAI(apiKey);
+  }
+  return _googleAI;
+}
 
 export type RunEmitter = (event: {
   type: string;
@@ -119,13 +145,24 @@ export async function runTask(
       run_id: runId,
     });
 
+    // Determine model format for Stagehand
+    let stagehandModel: string;
+    if (config.LLM_PROVIDER === "google") {
+      // Stagehand expects google/model-name format
+      stagehandModel = config.LLM_MODEL.startsWith("google/") 
+        ? config.LLM_MODEL 
+        : `google/${config.LLM_MODEL}`;
+    } else if (config.LLM_MODEL.startsWith("gpt")) {
+      stagehandModel = `openai/${config.LLM_MODEL}`;
+    } else {
+      stagehandModel = config.LLM_MODEL;
+    }
+
     stagehand = new Stagehand({
       env: "BROWSERBASE",
       apiKey: config.BROWSERBASE_API_KEY,
       projectId: config.BROWSERBASE_PROJECT_ID ?? "",
-      model: config.LLM_MODEL.startsWith("gpt")
-        ? `openai/${config.LLM_MODEL}`
-        : config.LLM_MODEL,
+      model: stagehandModel,
     });
     await stagehand.init();
 
@@ -147,6 +184,7 @@ export async function runTask(
     let step = 0;
     let lastUrl = "";
     let lastSig = "";
+    const actionHistory: string[] = []; // Track actions for loop prevention
 
     while (step < task.max_steps) {
       const url = page.url();
@@ -208,7 +246,7 @@ export async function runTask(
       } else {
         metrics.cache_misses++;
         const llmStart = Date.now();
-        const planned = await planStepWithLLM(task, state, step);
+        const planned = await planStepWithLLM(task, state, step, actionHistory);
         metrics.num_llm_calls++;
         action = {
           action: planned,
@@ -217,6 +255,9 @@ export async function runTask(
         };
         latencies.push(Date.now() - llmStart);
       }
+      
+      // Track action for loop prevention
+      actionHistory.push(action.action);
 
       await planStepWeave({
         state: { url: state.url, page_sig: pageSig },
@@ -349,6 +390,22 @@ export async function runTask(
     if (stagehand) await stagehand.close().catch(() => {});
   }
 
+  // Self-improvement analysis
+  try {
+    const analysis = await analyzeRun(runId, {
+      domain: task.domain,
+      intent: task.intent,
+      expectedUrl: task.success_condition.url_contains,
+      optimalSteps: 15,
+      expectedSequence: task.id === "saucedemo-checkout" 
+        ? ["username", "password", "login", "add to cart", "checkout"]
+        : undefined,
+    });
+    console.log(formatLearningReport(analysis));
+  } catch (err) {
+    console.warn("Self-improvement analysis failed:", err);
+  }
+
   return {
     runId,
     status: (await getRun(runId))?.status ?? "failed",
@@ -389,20 +446,51 @@ async function buildPageState(
 async function planStepWithLLM(
   task: Task,
   state: PageState,
-  step: number
+  step: number,
+  actionHistory: string[] = []
 ): Promise<string> {
-  const sys = `You are a browser automation agent. Current task: ${task.name}. ${task.description}.
+  // Build history context to avoid loops
+  const recentActions = actionHistory.slice(-5);
+  const historyContext = recentActions.length > 0 
+    ? `\nRecent actions (DO NOT repeat these): ${recentActions.join(" → ")}`
+    : "";
+  
+  const systemPrompt = `You are a browser automation agent. Current task: ${task.name}. ${task.description}.
 Success means: ${JSON.stringify(task.success_condition)}.
-Respond with exactly ONE natural language action for Stagehand. Examples: "click 'Login'", "type 'standard_user' in the username field", "click the 'Add to cart' button".
+
+CRITICAL RULES:
+1. ALWAYS fill in ALL form fields BEFORE clicking submit/login buttons
+2. For login forms: type username FIRST, then password, THEN click login
+3. NEVER click a submit button until all required fields are filled
+4. NEVER repeat an action you just did - if you typed something, move to the next field
+5. If an action failed, try a different approach
+
+Respond with exactly ONE natural language action for Stagehand.
+Examples: "type 'standard_user' in the username field", "type 'secret_sauce' in the password field", "click 'Login'"
 Only output the single action, no explanation.`;
-  const user = `Step ${step}. Page: ${state.title}. URL: ${state.url}.
-Actionable elements: ${state.actionable_labels.join(", ") || "unknown"}.
+  
+  const userPrompt = `Step ${step}. Page: ${state.title}. URL: ${state.url}.
+Actionable elements: ${state.actionable_labels.join(", ") || "unknown"}.${historyContext}
 What is the next action?`;
-  const res = await openai.chat.completions.create({
+
+  // Use Gemini if provider is google
+  if (config.LLM_PROVIDER === "google") {
+    const genAI = getGoogleAI();
+    const model = genAI.getGenerativeModel({ 
+      model: config.LLM_MODEL,
+      systemInstruction: systemPrompt,
+    });
+    const result = await model.generateContent(userPrompt);
+    const content = result.response.text()?.trim() ?? "click the first button";
+    return content;
+  }
+  
+  // Default to OpenAI-compatible API
+  const res = await getOpenAI().chat.completions.create({
     model: config.LLM_MODEL,
     messages: [
-      { role: "system", content: sys },
-      { role: "user", content: user },
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
     ],
     max_tokens: 150,
   });
