@@ -9,8 +9,24 @@
 
 import { config } from "../config.js";
 import { getRunEvents, getRun, setMacro } from "../redis.js";
-import { scoreOverall, scoreLoopDetection, scoreSequenceCorrectness } from "./scorers.js";
-import type { RunMeta, StepEvent, Macro } from "@loopless/shared";
+import { scoreOverall } from "./scorers.js";
+import { logEvaluationToWeave, logSelfImprovementToWeave } from "../weave.js";
+import type { RunMeta, StepEvent } from "@loopless/shared";
+
+/**
+ * Helper: Parse raw event strings into StepEvent objects
+ */
+function parseEvents(rawEvents: string[]): StepEvent[] {
+  return rawEvents
+    .map(e => {
+      try {
+        return JSON.parse(e) as StepEvent;
+      } catch {
+        return null;
+      }
+    })
+    .filter((e): e is StepEvent => e !== null);
+}
 
 // Weave client for feedback (optional)
 let weaveClient: unknown = null;
@@ -62,7 +78,8 @@ export async function analyzeRun(
   }
 ): Promise<LearningResult> {
   const run = await getRun(runId);
-  const events = await getRunEvents(runId);
+  const rawEvents = await getRunEvents(runId);
+  const events = parseEvents(rawEvents);
   
   if (!run) {
     return {
@@ -128,7 +145,14 @@ export async function analyzeRun(
   }
   
   // Send feedback to Weave if available
-  await sendWeaveEvaluation(runId, evaluation, issues, recommendations);
+  await sendWeaveEvaluation(
+    runId,
+    run.task_id,
+    run.mode,
+    evaluation,
+    issues,
+    recommendations
+  );
   
   return {
     runId,
@@ -144,7 +168,7 @@ export async function analyzeRun(
  * Extract successful action patterns and store as macros
  */
 async function learnMacrosFromRun(
-  run: RunMeta,
+  _run: RunMeta,
   events: StepEvent[],
   taskConfig: { domain: string; intent: string }
 ): Promise<number> {
@@ -166,14 +190,12 @@ async function learnMacrosFromRun(
   let learned = 0;
   for (const [pageSig, actions] of actionsByPage) {
     if (actions.length > 0) {
-      const macro: Macro = {
-        domain: taskConfig.domain,
-        intent: taskConfig.intent,
-        page_sig: pageSig,
+      // Macro type: { actions, success_count, fail_count, last_success_ts, metadata? }
+      const macro = {
         actions,
         success_count: 1,
         fail_count: 0,
-        last_used: new Date().toISOString(),
+        last_success_ts: Date.now(),
       };
       
       await setMacro(taskConfig.domain, taskConfig.intent, pageSig, macro);
@@ -186,34 +208,183 @@ async function learnMacrosFromRun(
 
 /**
  * Send evaluation results to Weave for tracking and analysis
+ * 
+ * This enables the feedback loop by storing:
+ * 1. Evaluation scores for each run (in Weave)
+ * 2. Failure cases for future training (in Redis)
+ * 3. Success patterns to learn from (in Redis)
  */
 async function sendWeaveEvaluation(
   runId: string,
+  taskId: string,
+  mode: string,
   evaluation: ReturnType<typeof scoreOverall>,
   issues: IssueType[],
   recommendations: string[]
 ): Promise<void> {
-  if (!config.WANDB_API_KEY) return;
+  const scores = Object.fromEntries(
+    Object.entries(evaluation.scores).map(([k, v]) => [k, v.score])
+  );
+  
+  // Log to Weave (will show up in Weave dashboard)
+  await logEvaluationToWeave({
+    runId,
+    taskId,
+    mode,
+    scores,
+    passed: evaluation.passed,
+    issues,
+    recommendations,
+  });
+  
+  // Also store in Redis for the feedback loop
+  if (!config.REDIS_URL) return;
   
   try {
-    // Log evaluation as a Weave dataset entry for future training
-    console.log(`[Weave] Logged evaluation for run ${runId}:`, {
+    const evalData = {
+      run_id: runId,
+      task_id: taskId,
+      mode,
       overall_score: evaluation.overall,
       passed: evaluation.passed,
       issues,
-      scores: Object.fromEntries(
-        Object.entries(evaluation.scores).map(([k, v]) => [k, v.score])
-      ),
+      recommendations,
+      scores,
+      timestamp: new Date().toISOString(),
+    };
+    
+    console.log(`[Eval] Logged for run ${runId}:`, {
+      score: evaluation.overall.toFixed(2),
+      passed: evaluation.passed,
+      issues,
     });
     
-    // In a full implementation, you would:
-    // 1. Call weave.log() to record the evaluation
-    // 2. Add feedback to the traced call using call.feedback.add()
-    // 3. Store failed runs in an evaluation dataset for retraining
+    const { createClient } = await import("redis");
+    const redis = createClient({ url: config.REDIS_URL });
+    await redis.connect().catch(() => null);
+    
+    if (redis.isOpen) {
+      // Store in a list of evaluations
+      await redis.lPush(
+        `${config.REDIS_PREFIX}:evaluations`,
+        JSON.stringify(evalData)
+      );
+      
+      // Also store by outcome for easy querying
+      const outcomeKey = evaluation.passed 
+        ? `${config.REDIS_PREFIX}:eval:success`
+        : `${config.REDIS_PREFIX}:eval:failure`;
+      await redis.lPush(outcomeKey, JSON.stringify(evalData));
+      
+      // Keep only last 100 evaluations
+      await redis.lTrim(`${config.REDIS_PREFIX}:evaluations`, 0, 99);
+      await redis.lTrim(outcomeKey, 0, 49);
+      
+      await redis.quit();
+    }
     
   } catch (err) {
-    console.warn("Failed to send Weave evaluation:", err);
+    console.warn("Failed to store evaluation in Redis:", err);
   }
+}
+
+/**
+ * Get failure patterns from past evaluations
+ * This can be used to improve prompts
+ */
+export async function getFailurePatterns(): Promise<{
+  issue: IssueType;
+  count: number;
+  examples: string[];
+}[]> {
+  try {
+    const { createClient } = await import("redis");
+    const redis = createClient({ url: config.REDIS_URL });
+    await redis.connect().catch(() => null);
+    
+    if (!redis.isOpen) return [];
+    
+    const failures = await redis.lRange(
+      `${config.REDIS_PREFIX}:eval:failure`,
+      0,
+      49
+    );
+    
+    await redis.quit();
+    
+    // Aggregate by issue type
+    const issueCounts = new Map<IssueType, { count: number; examples: string[] }>();
+    
+    for (const f of failures) {
+      const data = JSON.parse(f) as { issues: IssueType[]; recommendations: string[] };
+      for (const issue of data.issues) {
+        const existing = issueCounts.get(issue) || { count: 0, examples: [] };
+        existing.count++;
+        if (existing.examples.length < 3 && data.recommendations[0]) {
+          existing.examples.push(data.recommendations[0]);
+        }
+        issueCounts.set(issue, existing);
+      }
+    }
+    
+    return Array.from(issueCounts.entries())
+      .map(([issue, data]) => ({ issue, ...data }))
+      .sort((a, b) => b.count - a.count);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Generate an improved system prompt based on failure patterns
+ * This is the key to the self-improvement loop
+ */
+export async function generateImprovedPrompt(
+  currentPrompt: string,
+  failurePatterns: Awaited<ReturnType<typeof getFailurePatterns>>
+): Promise<string> {
+  if (failurePatterns.length === 0) return currentPrompt;
+  
+  // Log the improvement event to Weave
+  await logSelfImprovementToWeave({
+    type: "prompt_improved",
+    details: {
+      failure_patterns: failurePatterns.map(p => ({
+        issue: p.issue,
+        count: p.count,
+      })),
+      patterns_used: failurePatterns.length,
+    },
+  });
+  
+  // Generate additional rules based on failure patterns
+  const additionalRules: string[] = [];
+  
+  for (const pattern of failurePatterns) {
+    switch (pattern.issue) {
+      case "loop_detected":
+        additionalRules.push(
+          "- If an action fails, try a DIFFERENT approach instead of repeating"
+        );
+        break;
+      case "wrong_sequence":
+        additionalRules.push(
+          "- Follow the logical order: read page → fill forms → click submit"
+        );
+        break;
+      case "element_not_found":
+        additionalRules.push(
+          "- If element not found, wait or look for alternative selectors"
+        );
+        break;
+    }
+  }
+  
+  if (additionalRules.length > 0) {
+    return currentPrompt + "\n\nLEARNED FROM PAST FAILURES:\n" + additionalRules.join('\n');
+  }
+  
+  return currentPrompt;
 }
 
 /**
@@ -240,10 +411,13 @@ export async function measureImprovement(
     getRun(warmRunId),
   ]);
   
-  const [coldEvents, warmEvents] = await Promise.all([
+  const [rawColdEvents, rawWarmEvents] = await Promise.all([
     getRunEvents(coldRunId),
     getRunEvents(warmRunId),
   ]);
+  
+  const coldEvents = parseEvents(rawColdEvents);
+  const warmEvents = parseEvents(rawWarmEvents);
   
   const coldEval = scoreOverall(coldRun!, coldEvents, taskConfig);
   const warmEval = scoreOverall(warmRun!, warmEvents, taskConfig);
