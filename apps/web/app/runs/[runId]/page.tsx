@@ -4,6 +4,10 @@ import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState, useRef } from "react";
 
 const API = "/api";
+// For SSE, we need to call the server directly as Next.js proxy may buffer responses
+const SSE_API = typeof window !== "undefined" 
+  ? (process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001") + "/api"
+  : "/api";
 
 type RunMeta = {
   run_id: string;
@@ -23,6 +27,7 @@ type RunMeta = {
     final_url?: string;
     recording_url?: string;
     browserbase_session_id?: string;
+    live_view_url?: string;
   };
   error?: string;
 };
@@ -36,6 +41,7 @@ export default function RunPage() {
   const [run, setRun] = useState<RunMeta | null>(null);
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [live, setLive] = useState(true);
+  const [liveViewUrl, setLiveViewUrl] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -46,14 +52,22 @@ export default function RunPage() {
   }, [runId]);
 
   useEffect(() => {
-    const es = new EventSource(`${API}/runs/${runId}/events`);
+    const es = new EventSource(`${SSE_API}/runs/${runId}/events`);
+    
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data) as StreamEvent;
         if (data.type === "error") return;
         setEvents((prev) => [...prev, data]);
+        
+        // Capture live view URL when ready
+        if (data.type === "live_view_ready" && data.payload?.live_view_url) {
+          setLiveViewUrl(data.payload.live_view_url as string);
+        }
+        
         if (data.type === "run_finished" || data.type === "run_failed") {
           setLive(false);
+          setLiveViewUrl(null); // Clear live view when done
           es.close();
           fetch(`${API}/runs/${runId}`).then((r) => r.json()).then(setRun);
         }
@@ -145,6 +159,70 @@ export default function RunPage() {
         </div>
       )}
 
+      {/* Live View Stream - During Run */}
+      {liveViewUrl && isRunning && (
+        <section className="card p-6">
+          <h3 className="font-semibold text-white mb-4 text-lg flex items-center gap-2">
+            <span className="text-red-500 animate-pulse">●</span>
+            Live Browser View
+          </h3>
+          <div className="relative w-full" style={{ paddingBottom: "56.25%" }}>
+            <iframe
+              src={liveViewUrl}
+              className="absolute top-0 left-0 w-full h-full rounded-lg border border-[var(--border)]"
+              sandbox="allow-same-origin allow-scripts"
+              allow="clipboard-read; clipboard-write"
+            />
+          </div>
+          <p className="text-xs text-[var(--muted)] mt-2">
+            Watching browser session in real-time. You can interact with the browser if needed.
+          </p>
+        </section>
+      )}
+
+      {/* Session Recording - After Run Finishes */}
+      {!isRunning && run?.metrics?.browserbase_session_id && (
+        <section className="card p-6 bg-gradient-to-br from-violet-900/20 to-purple-900/20 border-violet-500/30">
+          <h3 className="font-semibold text-white mb-4 text-lg flex items-center gap-2">
+            <span>📹</span>
+            Session Recording
+          </h3>
+          <div className="space-y-4">
+            <p className="text-sm text-[var(--muted)]">
+              The full browser session has been recorded. Watch the replay to see exactly what happened.
+            </p>
+            <div className="flex flex-wrap gap-3">
+              <a
+                href={`https://www.browserbase.com/sessions/${run.metrics.browserbase_session_id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 px-5 py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors font-medium"
+              >
+                <span>▶️</span>
+                <span>Watch Full Recording</span>
+                <span>↗</span>
+              </a>
+              <a
+                href={`https://www.browserbase.com/sessions/${run.metrics.browserbase_session_id}/logs`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 px-5 py-3 bg-[var(--card)] hover:bg-[var(--border)] text-white rounded-lg transition-colors border border-[var(--border)]"
+              >
+                <span>📋</span>
+                <span>View Logs</span>
+                <span>↗</span>
+              </a>
+            </div>
+            <div className="text-xs text-[var(--muted)] mt-2 space-y-1">
+              <p>Session ID: <code className="bg-[var(--bg)] px-1.5 py-0.5 rounded">{run.metrics.browserbase_session_id}</code></p>
+              {run.metrics.final_url && (
+                <p>Final URL: <code className="bg-[var(--bg)] px-1.5 py-0.5 rounded">{run.metrics.final_url}</code></p>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* Metrics Grid */}
       {run?.metrics && (
         <section className="card p-6">
@@ -181,27 +259,6 @@ export default function RunPage() {
         </section>
       )}
 
-      {/* Recording Link */}
-      {run?.metrics?.recording_url && (
-        <section className="card p-6">
-          <h3 className="font-semibold text-white mb-4 text-lg">🎬 Session Recording</h3>
-          <div className="flex flex-col gap-3">
-            <a
-              href={run.metrics.recording_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 px-4 py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors w-fit"
-            >
-              <span>▶️</span>
-              <span>Watch Browserbase Recording</span>
-              <span>→</span>
-            </a>
-            <p className="text-xs text-[var(--muted)]">
-              Session ID: {run.metrics.browserbase_session_id || "N/A"}
-            </p>
-          </div>
-        </section>
-      )}
 
       {/* Self-Improvement Analysis */}
       {run?.metrics && !isRunning && (
