@@ -2,11 +2,27 @@
  * Evaluation Module Exports
  * 
  * This module provides comprehensive evaluation capabilities:
+ * - Weave built-in Evaluation framework with proper scorers
  * - Weave API client for querying past runs and feedback
  * - LLM-as-a-judge for intelligent evaluation
  * - Traditional scorers for metrics
  * - Self-improvement loop integration
  */
+
+// ============================================================
+// WEAVE BUILT-IN EVALUATION (NEW - Proper Integration)
+// ============================================================
+export {
+  taskSuccessScorer,
+  efficiencyScorer,
+  loopDetectionScorer,
+  cacheUtilizationScorer,
+  llmJudgeScorer,
+  createWeaveEvaluation,
+  evaluateRun,
+  runWeaveEvaluation,
+  scoreRunWithWeave,
+} from "./weave-evaluation.js";
 
 // Weave API Client - Query past evaluations directly from Weave
 export {
