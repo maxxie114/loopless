@@ -18,7 +18,13 @@ const logger = pino(
 );
 
 const app = express();
-app.use(cors({ origin: config.WEB_BASE_URL }));
+// Allow CORS from the web frontend for SSE and API calls
+app.use(cors({ 
+  origin: config.APP_ENV === "development" 
+    ? true  // Allow all origins in development
+    : config.WEB_BASE_URL,
+  credentials: true 
+}));
 app.use(express.json());
 
 app.use("/api/runs", runsRouter);

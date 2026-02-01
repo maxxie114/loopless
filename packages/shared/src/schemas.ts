@@ -41,6 +41,7 @@ export const RunMetricsSchema = z.object({
   weave_trace_url: z.string().optional(),
   browserbase_session_id: z.string().optional(),
   recording_url: z.string().optional(),
+  live_view_url: z.string().optional(),
 });
 export type RunMetrics = z.infer<typeof RunMetricsSchema>;
 

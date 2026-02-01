@@ -44,7 +44,7 @@ router.post("/", async (req: Request, res: Response) => {
       const e = (ev: { type: string; payload: Record<string, unknown> }) => {
         emitLive(runId, { type: ev.type, payload: ev.payload });
       };
-      return runTask(task_id, runMode, overrides, e);
+      return runTask(task_id, runMode, overrides, e, runId);
     };
     runWithEmit(coldRunId, "cold")
       .then(() => runWithEmit(warmRunId, "warm"))
@@ -64,7 +64,7 @@ router.post("/", async (req: Request, res: Response) => {
   const emitter = (ev: { type: string; payload: Record<string, unknown> }) => {
     emitLive(runId, { type: ev.type, payload: ev.payload });
   };
-  runTask(task_id, mode, overrides, emitter).catch(() => {});
+  runTask(task_id, mode, overrides, emitter, runId).catch(() => {});
 });
 
 router.get("/", async (_req: Request, res: Response) => {

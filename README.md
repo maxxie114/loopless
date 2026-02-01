@@ -4,6 +4,16 @@ A **self-improving browser agent** that becomes faster and more reliable over ti
 
 **Tagline:** Cold run learns. Warm run reuses cached macros and finishes with fewer LLM calls, fewer steps, and less time.
 
+## Features
+
+- **🎥 Live Browser View** - Watch the agent execute tasks in real-time via BrowserBase live streaming
+- **🧠 Self-Improvement Loop** - Agent learns from failures and improves prompts automatically
+- **📊 Weave Integration** - Full observability with W&B Weave tracing and LLM-as-a-Judge scoring
+- **💾 Macro Caching** - Successful action sequences cached in Redis for reuse
+- **🔄 Loop Detection** - Automatic detection and breaking of repetitive action loops
+- **📹 Session Recordings** - Watch past runs via BrowserBase recordings
+- **🎯 AGI Inc Benchmark Tasks** - GoCalendar, GoMail, MarriSuite, NetworkIn tasks
+
 ## Tech stack
 
 - **Backend:** Node.js 18+, Express, Weave TS SDK, OpenAI SDK, Redis (node-redis), Zod, Pino
@@ -94,10 +104,33 @@ self_improved_browser/
 
 Warm run should show **≥30% fewer LLM calls** or **≥20% faster wall time** vs cold on the same task.
 
+## Deployment
+
+### Deploy Frontend to Vercel
+
+1. Connect your GitHub repo to Vercel
+2. Set root directory to `apps/web`
+3. Add environment variable: `NEXT_PUBLIC_API_URL=<your-server-url>`
+4. Deploy
+
+### Deploy Server to Railway/Render
+
+1. Use the Dockerfile at `apps/server/Dockerfile`
+2. Set required environment variables:
+   - `WANDB_API_KEY` - W&B Weave API key
+   - `GOOGLE_API_KEY` - Gemini API key
+   - `BROWSERBASE_API_KEY` - BrowserBase API key
+   - `BROWSERBASE_PROJECT_ID` - BrowserBase project ID
+   - `REDIS_URL` - Redis Cloud connection string
+   - `REDIS_PASSWORD` - Redis password
+3. Deploy and note the server URL
+4. Update Vercel's `NEXT_PUBLIC_API_URL` with the server URL
+
 ## Docs
 
 - [W&B Weave (TS)](https://docs.wandb.ai/weave/quickstart) · [Weave Evaluations](https://docs.wandb.ai/weave/tutorial-eval)
 - [Browserbase](https://docs.browserbase.com/introduction/getting-started) · [Stagehand](https://docs.stagehand.dev/v3/first-steps/quickstart)
+- [BrowserBase Live View](https://docs.browserbase.com/features/session-live-view)
 - [Redis node-redis](https://redis.io/docs/latest/develop/clients/nodejs/)
 
 ## License
