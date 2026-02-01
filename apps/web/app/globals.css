@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0f0f12;
+  --card: #18181c;
+  --border: #2a2a30;
+  --muted: #71717a;
+  --accent: #a78bfa;
+  --success: #22c55e;
+  --error: #ef4444;
+}
+
+body {
+  background: var(--bg);
+  color: #e4e4e7;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
