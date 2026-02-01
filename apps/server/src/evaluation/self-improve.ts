@@ -1,16 +1,23 @@
 /**
- * Self-Improvement Loop
+ * Self-Improvement Loop with Weave Integration
  * 
  * This module implements the learning cycle:
- * 1. Run agent → 2. Evaluate performance → 3. Identify issues → 4. Store learnings
+ * 1. Run agent → 2. Evaluate with LLM Judge → 3. Pull feedback from Weave → 4. Improve prompts
  * 
- * Uses Weave for tracking and evaluation, Browserbase for session data.
+ * KEY FEATURES:
+ * - Queries Weave API directly to get past evaluations
+ * - Uses LLM-as-a-judge for intelligent evaluation
+ * - Feeds feedback back to the LLM to improve future runs
+ * 
+ * Uses Weave for tracking and evaluation, Redis for macro storage.
  */
 
 import { config } from "../config.js";
-import { getRunEvents, getRun, setMacro } from "../redis.js";
+import { getRunEvents, getRun, setMacro, getRedis } from "../redis.js";
 import { scoreOverall } from "./scorers.js";
 import { logEvaluationToWeave, logSelfImprovementToWeave } from "../weave.js";
+import { getWeaveClient, type FailureAnalysis } from "./weave-client.js";
+import { evaluateWithLLMJudge, type LLMJudgeResult } from "./llm-judge.js";
 import type { RunMeta, StepEvent } from "@loopless/shared";
 
 /**
@@ -28,22 +35,6 @@ function parseEvents(rawEvents: string[]): StepEvent[] {
     .filter((e): e is StepEvent => e !== null);
 }
 
-// Weave client for feedback (optional)
-let weaveClient: unknown = null;
-
-export async function initWeaveClient() {
-  if (!config.WANDB_API_KEY) return null;
-  
-  try {
-    const weave = await import("weave");
-    weaveClient = weave;
-    return weaveClient;
-  } catch {
-    console.warn("Weave not available for self-improvement feedback");
-    return null;
-  }
-}
-
 /**
  * Issue types the self-improvement system can detect
  */
@@ -53,6 +44,8 @@ export type IssueType =
   | "missed_action"        // Expected action never performed
   | "task_failed"          // Task didn't complete successfully
   | "timeout"              // Took too many steps
+  | "checkout_not_clicked" // Specifically for checkout issues
+  | "form_not_filled"      // Form fields not completed
   | "element_not_found";   // Stagehand couldn't find elements
 
 export interface LearningResult {
@@ -62,282 +55,252 @@ export interface LearningResult {
   issues: IssueType[];
   recommendations: string[];
   macrosLearned: number;
+  llmJudgeResult?: LLMJudgeResult;
 }
 
-/**
- * Analyze a completed run and extract learnings
- */
-export async function analyzeRun(
-  runId: string,
-  taskConfig: {
-    domain: string;
-    intent: string;
-    expectedUrl?: string;
-    optimalSteps?: number;
-    expectedSequence?: string[];
-  }
-): Promise<LearningResult> {
-  const run = await getRun(runId);
-  const rawEvents = await getRunEvents(runId);
-  const events = parseEvents(rawEvents);
-  
-  if (!run) {
-    return {
-      runId,
-      success: false,
-      overallScore: 0,
-      issues: ["task_failed"],
-      recommendations: ["Run not found in storage"],
-      macrosLearned: 0,
-    };
-  }
-  
-  // Score the run
-  const evaluation = scoreOverall(run, events, {
-    expectedUrl: taskConfig.expectedUrl,
-    optimalSteps: taskConfig.optimalSteps,
-    expectedSequence: taskConfig.expectedSequence,
-  });
-  
-  const issues: IssueType[] = [];
-  const recommendations: string[] = [];
-  
-  // Analyze each score for issues
-  if (!evaluation.scores.task_success.passed) {
-    issues.push("task_failed");
-    recommendations.push(
-      `Task did not complete. Final URL: ${run.metrics?.final_url}. ` +
-      `Expected URL to contain: ${taskConfig.expectedUrl}`
-    );
-  }
-  
-  if (!evaluation.scores.loop_detection.passed) {
-    issues.push("loop_detected");
-    const details = evaluation.scores.loop_detection.details;
-    recommendations.push(
-      `Agent repeated action ${details.max_consecutive_repeats} times. ` +
-      `Action: "${details.repeated_action}". ` +
-      `Consider: Check if element exists before acting, add fallback actions.`
-    );
-  }
-  
-  if (evaluation.scores.sequence_correctness && !evaluation.scores.sequence_correctness.passed) {
-    issues.push("wrong_sequence");
-    const details = evaluation.scores.sequence_correctness.details;
-    recommendations.push(
-      `Only completed ${details.completed_steps}/${details.total_expected} expected steps. ` +
-      `Missing steps may indicate wrong action order.`
-    );
-  }
-  
-  if (!evaluation.scores.step_efficiency.passed) {
-    issues.push("timeout");
-    recommendations.push(
-      `Used ${evaluation.scores.step_efficiency.details.actual_steps} steps, ` +
-      `optimal is ${taskConfig.optimalSteps}. Consider caching successful action sequences.`
-    );
-  }
-  
-  // Learn macros from successful sequences
-  let macrosLearned = 0;
-  if (evaluation.passed && run.metrics?.success) {
-    macrosLearned = await learnMacrosFromRun(run, events, taskConfig);
-  }
-  
-  // Send feedback to Weave if available
-  await sendWeaveEvaluation(
-    runId,
-    run.task_id,
-    run.mode,
-    evaluation,
-    issues,
-    recommendations
-  );
-  
-  return {
-    runId,
-    success: evaluation.passed,
-    overallScore: evaluation.overall,
-    issues,
-    recommendations,
-    macrosLearned,
-  };
-}
+// ===============================================================
+// WEAVE FEEDBACK - Pull directly from Weave API
+// ===============================================================
+
+// Cache for Weave feedback to avoid excessive API calls
+const feedbackCache = new Map<string, FailureAnalysis>();
+let lastFeedbackFetch = 0;
+const FEEDBACK_CACHE_TTL = 60000; // 60 seconds (increased since we're hitting API)
 
 /**
- * Extract successful action patterns and store as macros
+ * Fetch feedback DIRECTLY from Weave API
+ * This is the key function that enables true self-improvement
  */
-async function learnMacrosFromRun(
-  _run: RunMeta,
-  events: StepEvent[],
-  taskConfig: { domain: string; intent: string }
-): Promise<number> {
-  const stepEvents = events.filter(e => e.type === "step_planned");
-  
-  // Group actions by page signature
-  const actionsByPage = new Map<string, string[]>();
-  
-  for (const event of stepEvents) {
-    const payload = event.payload as { page_sig?: string; action?: string };
-    if (payload.page_sig && payload.action) {
-      const existing = actionsByPage.get(payload.page_sig) || [];
-      existing.push(payload.action);
-      actionsByPage.set(payload.page_sig, existing);
-    }
+export async function fetchWeaveFeedback(taskId?: string): Promise<FailureAnalysis | null> {
+  // Check cache
+  const cacheKey = taskId || "all";
+  if (Date.now() - lastFeedbackFetch < FEEDBACK_CACHE_TTL) {
+    const cached = feedbackCache.get(cacheKey);
+    if (cached) return cached;
   }
-  
-  // Store macros for pages where actions succeeded
-  let learned = 0;
-  for (const [pageSig, actions] of actionsByPage) {
-    if (actions.length > 0) {
-      // Macro type: { actions, success_count, fail_count, last_success_ts, metadata? }
-      const macro = {
-        actions,
-        success_count: 1,
-        fail_count: 0,
-        last_success_ts: Date.now(),
-      };
-      
-      await setMacro(taskConfig.domain, taskConfig.intent, pageSig, macro);
-      learned++;
-    }
-  }
-  
-  return learned;
-}
 
-/**
- * Send evaluation results to Weave for tracking and analysis
- * 
- * This enables the feedback loop by storing:
- * 1. Evaluation scores for each run (in Weave)
- * 2. Failure cases for future training (in Redis)
- * 3. Success patterns to learn from (in Redis)
- */
-async function sendWeaveEvaluation(
-  runId: string,
-  taskId: string,
-  mode: string,
-  evaluation: ReturnType<typeof scoreOverall>,
-  issues: IssueType[],
-  recommendations: string[]
-): Promise<void> {
-  const scores = Object.fromEntries(
-    Object.entries(evaluation.scores).map(([k, v]) => [k, v.score])
-  );
-  
-  // Log to Weave (will show up in Weave dashboard)
-  await logEvaluationToWeave({
-    runId,
-    taskId,
-    mode,
-    scores,
-    passed: evaluation.passed,
-    issues,
-    recommendations,
-  });
-  
-  // Also store in Redis for the feedback loop
-  if (!config.REDIS_URL) return;
-  
   try {
-    const evalData = {
-      run_id: runId,
-      task_id: taskId,
-      mode,
-      overall_score: evaluation.overall,
-      passed: evaluation.passed,
-      issues,
-      recommendations,
-      scores,
-      timestamp: new Date().toISOString(),
-    };
+    const weaveClient = getWeaveClient();
+    const analysis = await weaveClient.getFailureAnalysis(taskId);
     
-    console.log(`[Eval] Logged for run ${runId}:`, {
-      score: evaluation.overall.toFixed(2),
-      passed: evaluation.passed,
-      issues,
+    // Cache the result
+    feedbackCache.set(cacheKey, analysis);
+    lastFeedbackFetch = Date.now();
+    
+    console.log(`[Weave] Fetched failure analysis for ${taskId || "all tasks"}:`, {
+      totalRuns: analysis.totalRuns,
+      failedRuns: analysis.failedRuns,
+      successRate: `${(analysis.successRate * 100).toFixed(1)}%`,
+      commonIssues: analysis.commonIssues.length,
+      llmFeedback: analysis.llmJudgeFeedback.length,
     });
     
-    const { createClient } = await import("redis");
-    const redis = createClient({ url: config.REDIS_URL });
-    await redis.connect().catch(() => null);
-    
-    if (redis.isOpen) {
-      // Store in a list of evaluations
-      await redis.lPush(
-        `${config.REDIS_PREFIX}:evaluations`,
-        JSON.stringify(evalData)
-      );
-      
-      // Also store by outcome for easy querying
-      const outcomeKey = evaluation.passed 
-        ? `${config.REDIS_PREFIX}:eval:success`
-        : `${config.REDIS_PREFIX}:eval:failure`;
-      await redis.lPush(outcomeKey, JSON.stringify(evalData));
-      
-      // Keep only last 100 evaluations
-      await redis.lTrim(`${config.REDIS_PREFIX}:evaluations`, 0, 99);
-      await redis.lTrim(outcomeKey, 0, 49);
-      
-      await redis.quit();
-    }
-    
+    return analysis;
   } catch (err) {
-    console.warn("Failed to store evaluation in Redis:", err);
+    console.warn("[Weave] Failed to fetch feedback:", err);
+    
+    // Fall back to Redis if Weave API fails
+    return fallbackToRedisFeedback(taskId);
   }
 }
 
 /**
- * Get failure patterns from past evaluations
- * This can be used to improve prompts
+ * Fallback: Get feedback from Redis if Weave API is unavailable
+ */
+async function fallbackToRedisFeedback(taskId?: string): Promise<FailureAnalysis | null> {
+  const redis = await getRedis();
+  if (!redis) return null;
+
+  try {
+    const failures = await redis.lRange(
+      `${config.REDIS_PREFIX}:eval:failure`,
+      0,
+      49
+    );
+
+    const issues = new Map<string, { count: number; examples: string[] }>();
+    const recommendations: string[] = [];
+    let failureCount = 0;
+
+    for (const f of failures) {
+      try {
+        const data = JSON.parse(f) as {
+          task_id: string;
+          issues: string[];
+          recommendations: string[];
+        };
+
+        if (taskId && data.task_id !== taskId) continue;
+        
+        failureCount++;
+        
+        for (const issue of data.issues) {
+          const existing = issues.get(issue) || { count: 0, examples: [] };
+          existing.count++;
+          issues.set(issue, existing);
+        }
+        
+        for (const rec of data.recommendations.slice(0, 2)) {
+          if (!recommendations.includes(rec)) {
+            recommendations.push(rec);
+          }
+        }
+      } catch {
+        // Skip invalid entries
+      }
+    }
+
+    return {
+      taskId: taskId || "all",
+      totalRuns: failureCount, // Approximate
+      failedRuns: failureCount,
+      successRate: 0, // Unknown without success count
+      commonIssues: Array.from(issues.entries())
+        .map(([issue, data]) => ({ issue, ...data }))
+        .sort((a, b) => b.count - a.count),
+      recommendations: recommendations.slice(0, 5),
+      llmJudgeFeedback: [],
+    };
+  } catch (err) {
+    console.warn("[Redis] Failed to fetch feedback:", err);
+    return null;
+  }
+}
+
+/**
+ * Generate improved system prompt by incorporating Weave feedback
+ * This is THE KEY function for self-improvement
+ */
+export async function generateImprovedPromptFromWeave(
+  basePrompt: string,
+  taskId: string
+): Promise<string> {
+  const feedback = await fetchWeaveFeedback(taskId);
+
+  if (!feedback || feedback.failedRuns === 0) {
+    return basePrompt;
+  }
+
+  // Build improvement rules from Weave feedback
+  const rules: string[] = [
+    "",
+    "═══════════════════════════════════════════",
+    "🧠 LEARNED FROM PAST RUNS (via Weave)",
+    "═══════════════════════════════════════════",
+  ];
+
+  // Add stats
+  rules.push(`📊 Past Performance: ${feedback.failedRuns} failures out of ${feedback.totalRuns} runs (${(feedback.successRate * 100).toFixed(0)}% success rate)`);
+  rules.push("");
+
+  // Add specific rules based on common issues detected by Weave
+  if (feedback.commonIssues.length > 0) {
+    rules.push("⚠️ CRITICAL ISSUES TO AVOID:");
+    
+    for (const { issue, count } of feedback.commonIssues.slice(0, 5)) {
+      switch (issue) {
+        case "task_failed":
+          rules.push(`  • Task Incomplete (${count}x): Make sure to complete ALL steps including final confirmation`);
+          break;
+        case "loop_detected":
+          rules.push(`  • Loop Detected (${count}x): If an action fails, try a DIFFERENT approach immediately`);
+          break;
+        case "wrong_sequence":
+          rules.push(`  • Wrong Order (${count}x): Follow steps in the correct sequence`);
+          break;
+        case "timeout":
+          rules.push(`  • Timeout (${count}x): Be efficient - take the shortest path`);
+          break;
+        case "checkout_not_clicked":
+          rules.push(`  • Checkout Skipped (${count}x): After adding items, MUST click cart → checkout → fill form → finish`);
+          break;
+        case "form_not_filled":
+          rules.push(`  • Form Incomplete (${count}x): Fill ALL required form fields before submitting`);
+          break;
+        case "element_not_found":
+          rules.push(`  • Element Missing (${count}x): Wait for page load, scroll if needed, use alternative selectors`);
+          break;
+        default:
+          rules.push(`  • ${issue} (${count}x)`);
+      }
+    }
+    rules.push("");
+  }
+
+  // Add LLM Judge feedback (the most valuable insights!)
+  if (feedback.llmJudgeFeedback.length > 0) {
+    rules.push("🤖 LLM JUDGE FEEDBACK:");
+    
+    // Get the most recent failures with reasons
+    const recentFailures = feedback.llmJudgeFeedback
+      .filter(f => !f.passed)
+      .slice(0, 3);
+    
+    for (const f of recentFailures) {
+      if (f.reason) {
+        // Clean up and truncate the reason
+        const cleanReason = f.reason
+          .replace(/^(NO|YES)\s*[-:]\s*/i, "")
+          .slice(0, 150);
+        rules.push(`  → ${cleanReason}`);
+      }
+    }
+    rules.push("");
+  }
+
+  // Add specific recommendations
+  if (feedback.recommendations.length > 0) {
+    rules.push("📋 SPECIFIC RECOMMENDATIONS:");
+    for (const rec of feedback.recommendations.slice(0, 4)) {
+      // Extract actionable advice and truncate
+      const cleanRec = rec.slice(0, 120);
+      rules.push(`  → ${cleanRec}`);
+    }
+    rules.push("");
+  }
+
+  rules.push("═══════════════════════════════════════════");
+  rules.push("");
+
+  // Log that we're using improved prompt
+  console.log(`[Self-Improve] ✅ Injecting ${rules.length} learned rules for task ${taskId}`);
+  
+  await logSelfImprovementToWeave({
+    type: "prompt_improved",
+    details: {
+      task_id: taskId,
+      failure_count: feedback.failedRuns,
+      success_rate: feedback.successRate,
+      rules_added: rules.length,
+      common_issues: feedback.commonIssues.map(i => i.issue),
+      llm_feedback_count: feedback.llmJudgeFeedback.length,
+    },
+  });
+
+  return basePrompt + rules.join("\n");
+}
+
+/**
+ * Get failure patterns from past evaluations (uses Weave API)
  */
 export async function getFailurePatterns(): Promise<{
   issue: IssueType;
   count: number;
   examples: string[];
 }[]> {
-  try {
-    const { createClient } = await import("redis");
-    const redis = createClient({ url: config.REDIS_URL });
-    await redis.connect().catch(() => null);
-    
-    if (!redis.isOpen) return [];
-    
-    const failures = await redis.lRange(
-      `${config.REDIS_PREFIX}:eval:failure`,
-      0,
-      49
-    );
-    
-    await redis.quit();
-    
-    // Aggregate by issue type
-    const issueCounts = new Map<IssueType, { count: number; examples: string[] }>();
-    
-    for (const f of failures) {
-      const data = JSON.parse(f) as { issues: IssueType[]; recommendations: string[] };
-      for (const issue of data.issues) {
-        const existing = issueCounts.get(issue) || { count: 0, examples: [] };
-        existing.count++;
-        if (existing.examples.length < 3 && data.recommendations[0]) {
-          existing.examples.push(data.recommendations[0]);
-        }
-        issueCounts.set(issue, existing);
-      }
-    }
-    
-    return Array.from(issueCounts.entries())
-      .map(([issue, data]) => ({ issue, ...data }))
-      .sort((a, b) => b.count - a.count);
-  } catch {
-    return [];
-  }
+  const feedback = await fetchWeaveFeedback();
+  
+  if (!feedback) return [];
+  
+  return feedback.commonIssues.map(({ issue, count, examples }) => ({
+    issue: issue as IssueType,
+    count,
+    examples,
+  }));
 }
 
 /**
- * Generate an improved system prompt based on failure patterns
- * This is the key to the self-improvement loop
+ * Generate an improved system prompt based on failure patterns (legacy)
  */
 export async function generateImprovedPrompt(
   currentPrompt: string,
@@ -345,19 +308,6 @@ export async function generateImprovedPrompt(
 ): Promise<string> {
   if (failurePatterns.length === 0) return currentPrompt;
   
-  // Log the improvement event to Weave
-  await logSelfImprovementToWeave({
-    type: "prompt_improved",
-    details: {
-      failure_patterns: failurePatterns.map(p => ({
-        issue: p.issue,
-        count: p.count,
-      })),
-      patterns_used: failurePatterns.length,
-    },
-  });
-  
-  // Generate additional rules based on failure patterns
   const additionalRules: string[] = [];
   
   for (const pattern of failurePatterns) {
@@ -377,14 +327,311 @@ export async function generateImprovedPrompt(
           "- If element not found, wait or look for alternative selectors"
         );
         break;
+      case "task_failed":
+        additionalRules.push(
+          "- Make sure to complete ALL steps including checkout and finish"
+        );
+        break;
     }
   }
   
   if (additionalRules.length > 0) {
+    await logSelfImprovementToWeave({
+      type: "prompt_improved",
+      details: {
+        failure_patterns: failurePatterns.map(p => ({
+          issue: p.issue,
+          count: p.count,
+        })),
+        patterns_used: failurePatterns.length,
+      },
+    });
+    
     return currentPrompt + "\n\nLEARNED FROM PAST FAILURES:\n" + additionalRules.join('\n');
   }
   
   return currentPrompt;
+}
+
+/**
+ * Analyze a completed run and extract learnings
+ * NOW INCLUDES LLM-as-a-judge evaluation!
+ */
+export async function analyzeRun(
+  runId: string,
+  taskConfig: {
+    domain: string;
+    intent: string;
+    expectedUrl?: string;
+    optimalSteps?: number;
+    expectedSequence?: string[];
+    successCriteria?: string;
+  }
+): Promise<LearningResult> {
+  const run = await getRun(runId);
+  const rawEvents = await getRunEvents(runId);
+  const events = parseEvents(rawEvents);
+  
+  if (!run) {
+    return {
+      runId,
+      success: false,
+      overallScore: 0,
+      issues: ["task_failed"],
+      recommendations: ["Run not found in storage"],
+      macrosLearned: 0,
+    };
+  }
+  
+  // ===== NEW: Run LLM-as-a-judge evaluation =====
+  let llmJudgeResult: LLMJudgeResult | undefined;
+  try {
+    llmJudgeResult = await evaluateWithLLMJudge(run, events, {
+      intent: taskConfig.intent,
+      expectedUrl: taskConfig.expectedUrl,
+      expectedSequence: taskConfig.expectedSequence,
+      successCriteria: taskConfig.successCriteria,
+    });
+    
+    console.log(`[LLM Judge] Result for run ${runId.slice(0, 8)}:`, {
+      verdict: llmJudgeResult.verdict,
+      score: llmJudgeResult.score.toFixed(2),
+      reason: llmJudgeResult.reason.slice(0, 100),
+    });
+  } catch (err) {
+    console.warn("[LLM Judge] Evaluation failed:", err);
+  }
+  
+  // Score the run with traditional scorers
+  const evaluation = scoreOverall(run, events, {
+    expectedUrl: taskConfig.expectedUrl,
+    optimalSteps: taskConfig.optimalSteps,
+    expectedSequence: taskConfig.expectedSequence,
+  });
+  
+  const issues: IssueType[] = [];
+  const recommendations: string[] = [];
+  
+  // Analyze each score for issues
+  if (!evaluation.scores.task_success.passed) {
+    issues.push("task_failed");
+    
+    // Check for specific checkout issues
+    const hasCartItems = events.some(e => 
+      String(e.payload?.action || '').toLowerCase().includes('add to cart')
+    );
+    const hasCheckout = events.some(e => 
+      String(e.payload?.action || '').toLowerCase().includes('checkout')
+    );
+    
+    if (hasCartItems && !hasCheckout) {
+      issues.push("checkout_not_clicked");
+      recommendations.push(
+        "Agent added items to cart but never clicked checkout. " +
+        "After adding items, must: 1) Click cart icon 2) Click Checkout 3) Fill form 4) Click Finish"
+      );
+    } else {
+      recommendations.push(
+        `Task did not complete. Final URL: ${run.metrics?.final_url}. ` +
+        `Expected URL to contain: ${taskConfig.expectedUrl}`
+      );
+    }
+  }
+  
+  if (!evaluation.scores.loop_detection.passed) {
+    issues.push("loop_detected");
+    const details = evaluation.scores.loop_detection.details;
+    recommendations.push(
+      `Agent repeated action ${details.max_consecutive_repeats} times. ` +
+      `Action: "${details.repeated_action}". ` +
+      `SOLUTION: If action fails, immediately try different element or approach.`
+    );
+  }
+  
+  if (evaluation.scores.sequence_correctness && !evaluation.scores.sequence_correctness.passed) {
+    issues.push("wrong_sequence");
+    const details = evaluation.scores.sequence_correctness.details;
+    recommendations.push(
+      `Only completed ${details.completed_steps}/${details.total_expected} expected steps. ` +
+      `Missing steps may indicate wrong action order or incomplete workflow.`
+    );
+  }
+  
+  if (!evaluation.scores.step_efficiency.passed) {
+    issues.push("timeout");
+    recommendations.push(
+      `Used ${evaluation.scores.step_efficiency.details.actual_steps} steps, ` +
+      `optimal is ${taskConfig.optimalSteps}. Be more direct in completing the task.`
+    );
+  }
+  
+  // Add LLM judge recommendations
+  if (llmJudgeResult && !llmJudgeResult.passed && llmJudgeResult.reason) {
+    recommendations.push(`LLM Judge: ${llmJudgeResult.reason}`);
+  }
+  
+  // Learn macros from successful sequences
+  let macrosLearned = 0;
+  const isSuccess = evaluation.passed && (llmJudgeResult?.passed ?? true);
+  
+  if (isSuccess && run.metrics?.success) {
+    macrosLearned = await learnMacrosFromRun(run, events, taskConfig);
+  }
+  
+  // Send feedback to Weave and Redis
+  await sendWeaveEvaluation(
+    runId,
+    run.task_id,
+    run.mode,
+    evaluation,
+    issues,
+    recommendations,
+    llmJudgeResult
+  );
+  
+  // Combine scores
+  const finalScore = llmJudgeResult
+    ? (evaluation.overall * 0.6 + llmJudgeResult.score * 0.4)
+    : evaluation.overall;
+  
+  return {
+    runId,
+    success: isSuccess,
+    overallScore: finalScore,
+    issues,
+    recommendations,
+    macrosLearned,
+    llmJudgeResult,
+  };
+}
+
+/**
+ * Extract successful action patterns and store as macros
+ */
+async function learnMacrosFromRun(
+  _run: RunMeta,
+  events: StepEvent[],
+  taskConfig: { domain: string; intent: string }
+): Promise<number> {
+  const stepEvents = events.filter(e => e.type === "step_planned");
+  
+  const actionsByPage = new Map<string, string[]>();
+  
+  for (const event of stepEvents) {
+    const payload = event.payload as { page_sig?: string; action?: string };
+    if (payload.page_sig && payload.action) {
+      const existing = actionsByPage.get(payload.page_sig) || [];
+      existing.push(payload.action);
+      actionsByPage.set(payload.page_sig, existing);
+    }
+  }
+  
+  let learned = 0;
+  for (const [pageSig, actions] of actionsByPage) {
+    if (actions.length > 0) {
+      const macro = {
+        actions,
+        success_count: 1,
+        fail_count: 0,
+        last_success_ts: Date.now(),
+      };
+      
+      await setMacro(taskConfig.domain, taskConfig.intent, pageSig, macro);
+      learned++;
+    }
+  }
+  
+  return learned;
+}
+
+/**
+ * Send evaluation results to Weave and Redis for the feedback loop
+ */
+async function sendWeaveEvaluation(
+  runId: string,
+  taskId: string,
+  mode: string,
+  evaluation: ReturnType<typeof scoreOverall>,
+  issues: IssueType[],
+  recommendations: string[],
+  llmJudgeResult?: LLMJudgeResult
+): Promise<void> {
+  const scores = Object.fromEntries(
+    Object.entries(evaluation.scores).map(([k, v]) => [k, v.score])
+  );
+  
+  // Add LLM judge score
+  if (llmJudgeResult) {
+    scores["llm_judge"] = llmJudgeResult.score;
+    scores["llm_judge_task"] = llmJudgeResult.details.taskCompletion.score;
+    scores["llm_judge_actions"] = llmJudgeResult.details.actionCorrectness.score;
+    scores["llm_judge_state"] = llmJudgeResult.details.stateValidation.score;
+  }
+  
+  const passed = evaluation.passed && (llmJudgeResult?.passed ?? true);
+  
+  // Log to Weave
+  await logEvaluationToWeave({
+    runId,
+    taskId,
+    mode,
+    scores,
+    passed,
+    issues,
+    recommendations,
+  });
+  
+  // Store in Redis for the feedback loop
+  const redis = await getRedis();
+  if (!redis) return;
+  
+  try {
+    const evalData = {
+      run_id: runId,
+      task_id: taskId,
+      mode,
+      overall_score: llmJudgeResult 
+        ? (evaluation.overall * 0.6 + llmJudgeResult.score * 0.4)
+        : evaluation.overall,
+      passed,
+      issues,
+      recommendations,
+      scores,
+      llm_judge_verdict: llmJudgeResult?.verdict,
+      llm_judge_reason: llmJudgeResult?.reason,
+      timestamp: new Date().toISOString(),
+    };
+    
+    console.log(`[Eval] Logged for run ${runId}:`, {
+      score: evalData.overall_score.toFixed(2),
+      passed: evalData.passed,
+      issues,
+      llmVerdict: llmJudgeResult?.verdict,
+    });
+    
+    // Store in evaluations list
+    await redis.lPush(
+      `${config.REDIS_PREFIX}:evaluations`,
+      JSON.stringify(evalData)
+    );
+    
+    // Store by outcome for easy querying
+    const outcomeKey = passed 
+      ? `${config.REDIS_PREFIX}:eval:success`
+      : `${config.REDIS_PREFIX}:eval:failure`;
+    await redis.lPush(outcomeKey, JSON.stringify(evalData));
+    
+    // Keep only recent evaluations
+    await redis.lTrim(`${config.REDIS_PREFIX}:evaluations`, 0, 99);
+    await redis.lTrim(outcomeKey, 0, 49);
+    
+    // Clear feedback cache to force refresh from Weave
+    feedbackCache.clear();
+    lastFeedbackFetch = 0;
+    
+  } catch (err) {
+    console.warn("Failed to store evaluation in Redis:", err);
+  }
 }
 
 /**
@@ -450,6 +697,16 @@ export function formatLearningReport(result: LearningResult): string {
     `Macros Learned: ${result.macrosLearned}`,
   ];
   
+  // Add LLM Judge result
+  if (result.llmJudgeResult) {
+    lines.push(``);
+    lines.push(`🤖 LLM Judge Verdict: ${result.llmJudgeResult.verdict}`);
+    lines.push(`   Score: ${(result.llmJudgeResult.score * 100).toFixed(0)}%`);
+    if (result.llmJudgeResult.reason) {
+      lines.push(`   Reason: ${result.llmJudgeResult.reason.slice(0, 100)}`);
+    }
+  }
+  
   if (result.issues.length > 0) {
     lines.push(``, `Issues Detected:`);
     for (const issue of result.issues) {
@@ -460,7 +717,7 @@ export function formatLearningReport(result: LearningResult): string {
   if (result.recommendations.length > 0) {
     lines.push(``, `Recommendations:`);
     for (const rec of result.recommendations) {
-      lines.push(`  → ${rec}`);
+      lines.push(`  → ${rec.slice(0, 100)}`);
     }
   }
   
@@ -476,7 +733,18 @@ function formatIssueType(issue: IssueType): string {
     missed_action: "⏭️ Missed Action - Expected step not performed",
     task_failed: "❌ Task Failed - Did not complete successfully",
     timeout: "⏱️ Timeout - Exceeded step limit",
+    checkout_not_clicked: "🛒 Checkout Not Clicked - Added to cart but didn't checkout",
+    form_not_filled: "📝 Form Not Filled - Required fields missing",
     element_not_found: "🔍 Element Not Found - Could not locate target",
   };
   return labels[issue] || issue;
+}
+
+/**
+ * Clear feedback cache to force fresh fetch from Weave
+ */
+export function clearFeedbackCache(): void {
+  feedbackCache.clear();
+  lastFeedbackFetch = 0;
+  console.log("[Self-Improve] Feedback cache cleared");
 }

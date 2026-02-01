@@ -23,7 +23,7 @@ import {
   getHostname,
   getPathname,
 } from "../page-signature.js";
-import { analyzeRun, formatLearningReport, getFailurePatterns, generateImprovedPrompt } from "../evaluation/self-improve.js";
+import { analyzeRun, formatLearningReport, generateImprovedPromptFromWeave } from "../evaluation/self-improve.js";
 import type {
   RunMeta,
   RunMetrics,
@@ -233,10 +233,48 @@ export async function runTask(
       }
 
       let action: PlannedAction;
-      const macro = useMacros
+      
+      // Check if we're in a loop state - if so, skip macros and use LLM
+      const recentActions = actionHistory.slice(-3);
+      const isRepeating = recentActions.length >= 3 && 
+        recentActions.every(a => a === recentActions[0]);
+      const loopCount = signatureHistory.filter((s) => s === pageSig).length;
+      const inLoopState = isRepeating || loopCount >= 2;
+      
+      // Try to use macro, but validate it makes sense for current page
+      const macro = (useMacros && !inLoopState)
         ? await getMacro(task.domain, task.intent, pageSig)
         : null;
+      
+      // Validate macro action is relevant to current page elements
+      let macroValid = false;
       if (macro && macro.actions.length > 0) {
+        const macroAction = macro.actions[0].toLowerCase();
+        const pageElements = state.actionable_labels.map(l => l.toLowerCase()).join(" ");
+        
+        // Check if the macro action mentions elements that exist on the page
+        // or is a generic action that should work
+        const genericActions = ["click", "scroll", "wait", "navigate", "go"];
+        const isGenericAction = genericActions.some(g => macroAction.startsWith(g));
+        const mentionsPageElement = state.actionable_labels.some(label => 
+          macroAction.includes(label.toLowerCase().slice(0, 10)) ||
+          label.toLowerCase().includes(macroAction.split(" ").slice(-1)[0]?.slice(0, 8) || "")
+        );
+        
+        // For form actions, check if the form fields exist
+        const isFormAction = macroAction.includes("type") || macroAction.includes("fill") || macroAction.includes("enter");
+        const formFieldMentioned = isFormAction && (
+          macroAction.includes("username") && pageElements.includes("user") ||
+          macroAction.includes("password") && pageElements.includes("pass") ||
+          macroAction.includes("first") && pageElements.includes("first") ||
+          macroAction.includes("last") && pageElements.includes("last") ||
+          macroAction.includes("zip") && pageElements.includes("zip")
+        );
+        
+        macroValid = isGenericAction || mentionsPageElement || formFieldMentioned || !isFormAction;
+      }
+      
+      if (macro && macro.actions.length > 0 && macroValid) {
         action = {
           action: macro.actions[0],
           cache_hit: true,
@@ -244,6 +282,10 @@ export async function runTask(
         };
         metrics.cache_hits++;
       } else {
+        if (macro && !macroValid) {
+          // Macro exists but isn't valid for current page state
+          console.log(`[Agent] Skipping invalid macro for page state: ${macro.actions[0]?.slice(0, 50)}`);
+        }
         metrics.cache_misses++;
         const llmStart = Date.now();
         const planned = await planStepWithLLM(task, state, step, actionHistory);
@@ -317,15 +359,36 @@ export async function runTask(
       lastSig = pageSig;
       signatureHistory.push(pageSig);
 
+      // Improved loop detection and breaking
       const repeated = signatureHistory.filter((s) => s === pageSig).length;
-      if (repeated >= 3 && !progress) {
+      const sameActionRepeated = actionHistory.slice(-3).every(a => a === action.action);
+      
+      if ((repeated >= 3 || sameActionRepeated) && !progress) {
         metrics.num_loop_detected++;
-        metrics.num_loop_broken++;
         emit({
           type: "loop_detected",
-          payload: { step, page_sig: pageSig },
+          payload: { step, page_sig: pageSig, action: action.action },
         });
-        await page.goBack().catch(() => {});
+        
+        // Try multiple loop-breaking strategies
+        if (repeated >= 5) {
+          // Too many loops on same page - try refreshing
+          console.log(`[Agent] Breaking loop: refreshing page after ${repeated} repeats`);
+          await page.reload().catch(() => {});
+          metrics.num_loop_broken++;
+        } else if (sameActionRepeated) {
+          // Same action keeps failing - clear action history to force LLM to try something new
+          console.log(`[Agent] Breaking loop: clearing action history to try new approach`);
+          actionHistory.length = 0; // Clear history
+          metrics.num_loop_broken++;
+        } else {
+          // Default: try going back
+          console.log(`[Agent] Breaking loop: going back`);
+          await page.goBack().catch(() => {});
+          metrics.num_loop_broken++;
+        }
+        
+        await new Promise((r) => setTimeout(r, 1000));
       }
 
       await validateProgressWeave({
@@ -445,8 +508,9 @@ async function buildPageState(
 
 // Cache for improved prompt (refreshed once per run)
 let cachedImprovedPrompt: string | null = null;
+let cachedTaskId: string | null = null;
 let promptCacheTime = 0;
-const PROMPT_CACHE_TTL = 60000; // 1 minute
+const PROMPT_CACHE_TTL = 30000; // 30 seconds - refresh more often for self-improvement
 
 async function planStepWithLLM(
   task: Task,
@@ -460,42 +524,73 @@ async function planStepWithLLM(
     ? `\nRecent actions (DO NOT repeat these): ${recentActions.join(" → ")}`
     : "";
   
-  // Base system prompt
-  let systemPrompt = `You are a browser automation agent. Current task: ${task.name}. ${task.description}.
+  // Detect current page context
+  const isLoginPage = state.url.includes('saucedemo.com') && !state.url.includes('inventory');
+  const isInventoryPage = state.url.includes('inventory');
+  const isCartPage = state.url.includes('cart');
+  const isCheckoutPage = state.url.includes('checkout');
+  
+  // Build context-aware base prompt
+  let basePrompt = `You are a browser automation agent. Current task: ${task.name}.
+Task description: ${task.description}
 Success means: ${JSON.stringify(task.success_condition)}.
 
-CRITICAL RULES:
-1. ALWAYS fill in ALL form fields BEFORE clicking submit/login buttons
-2. For login forms: type username FIRST, then password, THEN click login
-3. NEVER click a submit button until all required fields are filled
-4. NEVER repeat an action you just did - if you typed something, move to the next field
-5. If an action failed, try a different approach
+CRITICAL WORKFLOW FOR SAUCEDEMO CHECKOUT:
+1. LOGIN PAGE: Type 'standard_user' in username → Type 'secret_sauce' in password → Click 'Login'
+2. INVENTORY PAGE: Click 'Add to cart' on items → Click the shopping cart icon (top right)
+3. CART PAGE: Click 'Checkout' button
+4. CHECKOUT FORM: Fill First Name, Last Name, Zip Code → Click 'Continue'
+5. CHECKOUT OVERVIEW: Click 'Finish' button
+6. COMPLETE: You should see 'THANK YOU' message
 
-Respond with exactly ONE natural language action for Stagehand.
-Examples: "type 'standard_user' in the username field", "type 'secret_sauce' in the password field", "click 'Login'"
+CURRENT PAGE CONTEXT:
+${isLoginPage ? '📍 You are on the LOGIN PAGE - enter credentials and click Login' : ''}
+${isInventoryPage ? '📍 You are on the INVENTORY PAGE - add items then click the CART ICON' : ''}
+${isCartPage ? '📍 You are on the CART PAGE - click the CHECKOUT button to proceed' : ''}
+${isCheckoutPage ? '📍 You are on CHECKOUT - fill the form OR click Finish' : ''}
+
+RULES:
+1. NEVER repeat the same action twice - if it didn't work, try a DIFFERENT element
+2. Fill ALL form fields BEFORE clicking submit buttons
+3. Look for the shopping cart ICON (not text) to go to cart
+4. After adding to cart, you MUST click the cart icon to proceed
+5. You MUST click Checkout, fill form, click Continue, then click Finish
+
+Respond with exactly ONE action. Examples:
+- "type 'standard_user' in the username field"
+- "type 'secret_sauce' in the password field"  
+- "click the Login button"
+- "click 'Add to cart' on the first product"
+- "click the shopping cart icon"
+- "click 'Checkout'"
+- "type 'Test' in the First Name field"
+- "click 'Continue'"
+- "click 'Finish'"
+
 Only output the single action, no explanation.`;
 
   // ═══════════════════════════════════════════════════════════════
-  // SELF-IMPROVEMENT: Load learned rules from past failures
-  // This is the feedback loop - we query past failures and add
-  // learned rules to the prompt
+  // SELF-IMPROVEMENT: Load learned rules from Weave feedback
+  // This is the feedback loop - we query Weave/Redis for past failures
+  // and inject learned rules into the prompt
   // ═══════════════════════════════════════════════════════════════
-  if (!cachedImprovedPrompt || Date.now() - promptCacheTime > PROMPT_CACHE_TTL) {
+  if (!cachedImprovedPrompt || cachedTaskId !== task.id || Date.now() - promptCacheTime > PROMPT_CACHE_TTL) {
     try {
-      const failurePatterns = await getFailurePatterns();
-      if (failurePatterns.length > 0) {
-        cachedImprovedPrompt = await generateImprovedPrompt(systemPrompt, failurePatterns);
-        promptCacheTime = Date.now();
-        console.log(`[Self-Improve] Loaded ${failurePatterns.length} failure patterns into prompt`);
-      } else {
-        cachedImprovedPrompt = systemPrompt;
+      // Use the new Weave feedback integration
+      cachedImprovedPrompt = await generateImprovedPromptFromWeave(basePrompt, task.id);
+      cachedTaskId = task.id;
+      promptCacheTime = Date.now();
+      
+      if (cachedImprovedPrompt !== basePrompt) {
+        console.log(`[Self-Improve] ✅ Injected Weave feedback into prompt for task: ${task.id}`);
       }
-    } catch {
-      cachedImprovedPrompt = systemPrompt;
+    } catch (err) {
+      console.warn("[Self-Improve] Failed to fetch Weave feedback:", err);
+      cachedImprovedPrompt = basePrompt;
     }
   }
   
-  systemPrompt = cachedImprovedPrompt || systemPrompt;
+  const systemPrompt = cachedImprovedPrompt || basePrompt;
   
   const userPrompt = `Step ${step}. Page: ${state.title}. URL: ${state.url}.
 Actionable elements: ${state.actionable_labels.join(", ") || "unknown"}.${historyContext}
