@@ -13,6 +13,7 @@
     "dotenv": "^16.4.5",
     "@loopless/shared": "workspace:*",
     "@browserbasehq/stagehand": "^3.0.0",
+    "@google/generative-ai": "^0.21.0",
     "cors": "^2.8.5",
     "express": "^4.21.0",
     "openai": "^4.73.0",
