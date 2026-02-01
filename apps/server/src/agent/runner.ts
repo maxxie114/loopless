@@ -1,4 +1,5 @@
 import { Stagehand } from "@browserbasehq/stagehand";
+import Browserbase from "@browserbasehq/sdk";
 import OpenAI from "openai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { config } from "../config.js";
@@ -34,6 +35,30 @@ import type {
   PlannedAction,
 } from "@loopless/shared";
 import { randomUUID } from "crypto";
+
+// BrowserBase client for getting live view URLs
+let _browserbase: Browserbase | null = null;
+function getBrowserbase(): Browserbase {
+  if (!_browserbase) {
+    if (!config.BROWSERBASE_API_KEY) {
+      throw new Error("BROWSERBASE_API_KEY is required");
+    }
+    _browserbase = new Browserbase({ apiKey: config.BROWSERBASE_API_KEY });
+  }
+  return _browserbase;
+}
+
+// Get live view URL for a session
+async function getLiveViewUrl(sessionId: string): Promise<string | undefined> {
+  try {
+    const bb = getBrowserbase();
+    const debugUrls = await bb.sessions.debug(sessionId);
+    return debugUrls.debuggerFullscreenUrl;
+  } catch (err) {
+    console.warn("[BrowserBase] Failed to get live view URL:", err);
+    return undefined;
+  }
+}
 
 // Lazy-init LLM clients
 let _openai: OpenAI | null = null;
@@ -89,7 +114,8 @@ export async function runTask(
   taskId: string,
   mode: RunMode,
   overrides: Record<string, unknown> | undefined,
-  emit: RunEmitter = defaultEmitter
+  emit: RunEmitter = defaultEmitter,
+  providedRunId?: string
 ): Promise<RunResult> {
   if (mode === "twice") {
     const cold = await runTask(taskId, "cold", overrides, emit);
@@ -105,7 +131,7 @@ export async function runTask(
 
   const task = getTask(taskId);
   if (!task) throw new Error(`Unknown task: ${taskId}`);
-  const runId = randomUUID();
+  const runId = providedRunId || randomUUID();
   const useMacros = mode === "warm";
   const startTime = Date.now();
 
@@ -132,7 +158,9 @@ export async function runTask(
     updated_at: new Date().toISOString(),
   };
   await setRun(runId, meta);
-  emit({ type: "run_started", payload: { run_id: runId, task_id: taskId, mode } });
+  const startEvent = { type: "run_started", payload: { run_id: runId, task_id: taskId, mode } };
+  emit(startEvent);
+  await appendRunEvent(runId, startEvent);
 
   let stagehand: Stagehand | null = null;
   const signatureHistory: string[] = [];
@@ -168,15 +196,63 @@ export async function runTask(
 
     const page = stagehand.context.pages()[0];
     if (!page) throw new Error("No page");
+    
+    // Try multiple ways to get the session ID
     let sessionId: string | undefined;
-    const browserContext = stagehand.context as unknown as { _browserbaseSessionId?: string };
-    if (browserContext._browserbaseSessionId) {
-      sessionId = String(browserContext._browserbaseSessionId);
+    const browserContext = stagehand.context as unknown as { 
+      _browserbaseSessionId?: string;
+      browserbaseSessionId?: string;
+      sessionId?: string;
+    };
+    sessionId = browserContext._browserbaseSessionId 
+      || browserContext.browserbaseSessionId 
+      || browserContext.sessionId;
+    
+    // Also try getting it from stagehand directly
+    const stagehandAny = stagehand as unknown as { 
+      browserbaseSessionId?: string;
+      sessionId?: string;
+      _sessionId?: string;
+    };
+    sessionId = sessionId || stagehandAny.browserbaseSessionId 
+      || stagehandAny.sessionId 
+      || stagehandAny._sessionId;
+    
+    if (sessionId) {
+      console.log(`[BrowserBase] Session ID: ${sessionId}`);
+    } else {
+      console.log(`[BrowserBase] Warning: Could not extract session ID`);
     }
+    
     metrics.browserbase_session_id = sessionId;
     metrics.recording_url = sessionId
       ? `https://www.browserbase.com/sessions/${sessionId}`
       : undefined;
+
+    // Get live view URL for real-time streaming
+    if (sessionId) {
+      try {
+        const liveViewUrl = await getLiveViewUrl(sessionId);
+        if (liveViewUrl) {
+          metrics.live_view_url = liveViewUrl;
+          const liveViewEvent = {
+            type: "live_view_ready",
+            payload: {
+              run_id: runId,
+              live_view_url: liveViewUrl,
+              session_id: sessionId,
+            },
+          };
+          // Emit live view URL immediately so frontend can start streaming
+          emit(liveViewEvent);
+          // Also persist to Redis so it's available when page loads
+          await appendRunEvent(runId, liveViewEvent);
+          console.log(`[BrowserBase] Live view: ${liveViewUrl}`);
+        }
+      } catch (err) {
+        console.warn(`[BrowserBase] Failed to get live view:`, err);
+      }
+    }
 
     await page.goto(task.start_url, { waitUntil: "domcontentloaded" });
     await new Promise((r) => setTimeout(r, 1500));
@@ -365,10 +441,12 @@ export async function runTask(
       
       if ((repeated >= 3 || sameActionRepeated) && !progress) {
         metrics.num_loop_detected++;
-        emit({
+        const loopEvent = {
           type: "loop_detected",
           payload: { step, page_sig: pageSig, action: action.action },
-        });
+        };
+        emit(loopEvent);
+        await appendRunEvent(runId, loopEvent);
         
         // Try multiple loop-breaking strategies
         if (repeated >= 5) {
@@ -397,10 +475,12 @@ export async function runTask(
         final_url: urlAfter,
       });
 
-      emit({
+      const validatedEvent = {
         type: "step_validated",
         payload: { step, progress, url_after: urlAfter },
-      });
+      };
+      emit(validatedEvent);
+      await appendRunEvent(runId, validatedEvent);
 
       if (progress && action.action) {
         const macroToSave: Macro = {
@@ -437,7 +517,9 @@ export async function runTask(
       meta.metrics = metrics;
       meta.updated_at = new Date().toISOString();
       await setRun(runId, meta);
-      emit({ type: "run_finished", payload: { run_id: runId, metrics } });
+      const finishedEvent = { type: "run_finished", payload: { run_id: runId, metrics } };
+      emit(finishedEvent);
+      await appendRunEvent(runId, finishedEvent);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

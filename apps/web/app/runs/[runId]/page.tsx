@@ -4,6 +4,10 @@ import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState, useRef } from "react";
 
 const API = "/api";
+// For SSE, we need to call the server directly as Next.js proxy may buffer responses
+const SSE_API = typeof window !== "undefined" 
+  ? (process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001") + "/api"
+  : "/api";
 
 type RunMeta = {
   run_id: string;
@@ -23,6 +27,7 @@ type RunMeta = {
     final_url?: string;
     recording_url?: string;
     browserbase_session_id?: string;
+    live_view_url?: string;
   };
   error?: string;
 };
@@ -36,6 +41,7 @@ export default function RunPage() {
   const [run, setRun] = useState<RunMeta | null>(null);
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [live, setLive] = useState(true);
+  const [liveViewUrl, setLiveViewUrl] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -46,14 +52,22 @@ export default function RunPage() {
   }, [runId]);
 
   useEffect(() => {
-    const es = new EventSource(`${API}/runs/${runId}/events`);
+    const es = new EventSource(`${SSE_API}/runs/${runId}/events`);
+    
     es.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data) as StreamEvent;
         if (data.type === "error") return;
         setEvents((prev) => [...prev, data]);
+        
+        // Capture live view URL when ready
+        if (data.type === "live_view_ready" && data.payload?.live_view_url) {
+          setLiveViewUrl(data.payload.live_view_url as string);
+        }
+        
         if (data.type === "run_finished" || data.type === "run_failed") {
           setLive(false);
+          setLiveViewUrl(null); // Clear live view when done
           es.close();
           fetch(`${API}/runs/${runId}`).then((r) => r.json()).then(setRun);
         }
@@ -143,6 +157,27 @@ export default function RunPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Live View Stream */}
+      {liveViewUrl && isRunning && (
+        <section className="card p-6">
+          <h3 className="font-semibold text-white mb-4 text-lg flex items-center gap-2">
+            <span className="text-red-500 animate-pulse">●</span>
+            Live Browser View
+          </h3>
+          <div className="relative w-full" style={{ paddingBottom: "56.25%" }}>
+            <iframe
+              src={liveViewUrl}
+              className="absolute top-0 left-0 w-full h-full rounded-lg border border-[var(--border)]"
+              sandbox="allow-same-origin allow-scripts"
+              allow="clipboard-read; clipboard-write"
+            />
+          </div>
+          <p className="text-xs text-[var(--muted)] mt-2">
+            Watching browser session in real-time. You can interact with the browser if needed.
+          </p>
+        </section>
       )}
 
       {/* Metrics Grid */}
