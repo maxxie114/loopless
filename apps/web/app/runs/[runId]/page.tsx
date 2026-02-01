@@ -159,7 +159,7 @@ export default function RunPage() {
         </div>
       )}
 
-      {/* Live View Stream */}
+      {/* Live View Stream - During Run */}
       {liveViewUrl && isRunning && (
         <section className="card p-6">
           <h3 className="font-semibold text-white mb-4 text-lg flex items-center gap-2">
@@ -177,6 +177,49 @@ export default function RunPage() {
           <p className="text-xs text-[var(--muted)] mt-2">
             Watching browser session in real-time. You can interact with the browser if needed.
           </p>
+        </section>
+      )}
+
+      {/* Session Recording - After Run Finishes */}
+      {!isRunning && run?.metrics?.browserbase_session_id && (
+        <section className="card p-6 bg-gradient-to-br from-violet-900/20 to-purple-900/20 border-violet-500/30">
+          <h3 className="font-semibold text-white mb-4 text-lg flex items-center gap-2">
+            <span>📹</span>
+            Session Recording
+          </h3>
+          <div className="space-y-4">
+            <p className="text-sm text-[var(--muted)]">
+              The full browser session has been recorded. Watch the replay to see exactly what happened.
+            </p>
+            <div className="flex flex-wrap gap-3">
+              <a
+                href={`https://www.browserbase.com/sessions/${run.metrics.browserbase_session_id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 px-5 py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors font-medium"
+              >
+                <span>▶️</span>
+                <span>Watch Full Recording</span>
+                <span>↗</span>
+              </a>
+              <a
+                href={`https://www.browserbase.com/sessions/${run.metrics.browserbase_session_id}/logs`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 px-5 py-3 bg-[var(--card)] hover:bg-[var(--border)] text-white rounded-lg transition-colors border border-[var(--border)]"
+              >
+                <span>📋</span>
+                <span>View Logs</span>
+                <span>↗</span>
+              </a>
+            </div>
+            <div className="text-xs text-[var(--muted)] mt-2 space-y-1">
+              <p>Session ID: <code className="bg-[var(--bg)] px-1.5 py-0.5 rounded">{run.metrics.browserbase_session_id}</code></p>
+              {run.metrics.final_url && (
+                <p>Final URL: <code className="bg-[var(--bg)] px-1.5 py-0.5 rounded">{run.metrics.final_url}</code></p>
+              )}
+            </div>
+          </div>
         </section>
       )}
 
@@ -216,27 +259,6 @@ export default function RunPage() {
         </section>
       )}
 
-      {/* Recording Link */}
-      {run?.metrics?.recording_url && (
-        <section className="card p-6">
-          <h3 className="font-semibold text-white mb-4 text-lg">🎬 Session Recording</h3>
-          <div className="flex flex-col gap-3">
-            <a
-              href={run.metrics.recording_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 px-4 py-3 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors w-fit"
-            >
-              <span>▶️</span>
-              <span>Watch Browserbase Recording</span>
-              <span>→</span>
-            </a>
-            <p className="text-xs text-[var(--muted)]">
-              Session ID: {run.metrics.browserbase_session_id || "N/A"}
-            </p>
-          </div>
-        </section>
-      )}
 
       {/* Self-Improvement Analysis */}
       {run?.metrics && !isRunning && (
