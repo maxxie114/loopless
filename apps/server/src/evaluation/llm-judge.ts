@@ -82,7 +82,7 @@ export async function evaluateWithLLMJudge(
   };
   
   // Log to Weave for tracking
-  await logLLMJudgeResult(run.id, run.task_id, result);
+  await logLLMJudgeResult(run.run_id, run.task_id, result);
   
   return result;
 }

@@ -10,14 +10,14 @@
  * The UI can stream progress in real-time via SSE.
  */
 
-import { runTask, type RunResult } from "./agent/runner.js";
-import { analyzeRun, clearFeedbackCache, formatLearningReport } from "./evaluation/self-improve.js";
+import { runTask } from "./agent/runner.js";
+import { analyzeRun, clearFeedbackCache } from "./evaluation/self-improve.js";
 import { evaluateWithLLMJudge } from "./evaluation/llm-judge.js";
-import { getRun, getRunEvents, setRun, getRedis } from "./redis.js";
+import { getRun, getRunEvents, getRedis } from "./redis.js";
 import { getTask } from "./tasks.js";
 import { config } from "./config.js";
 import { logSelfImprovementToWeave } from "./weave.js";
-import type { RunMeta, StepEvent } from "@loopless/shared";
+import type { StepEvent } from "@loopless/shared";
 
 export interface AutoImproveConfig {
   taskId: string;
