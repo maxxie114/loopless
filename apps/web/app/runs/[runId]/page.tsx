@@ -147,14 +147,39 @@ export default function RunPage() {
       {/* Running Status */}
       {run && isRunning && (
         <div className="p-4 rounded-lg bg-blue-500/10 border border-blue-500/30">
-          <div className="flex items-center gap-3">
-            <span className="text-3xl animate-spin">⚡</span>
-            <div>
-              <h2 className="text-xl font-bold text-blue-400">RUNNING...</h2>
-              <p className="text-sm text-[var(--muted)]">
-                {run.mode === "cold" ? "Cold Run (Learning)" : "Warm Run (Using Macros)"}
-              </p>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className="text-3xl animate-spin">⚡</span>
+              <div>
+                <h2 className="text-xl font-bold text-blue-400">RUNNING...</h2>
+                <p className="text-sm text-[var(--muted)]">
+                  {run.mode === "cold" ? "Cold Run (Learning)" : "Warm Run (Using Macros)"}
+                </p>
+              </div>
             </div>
+            <button
+              onClick={async () => {
+                if (confirm("Are you sure you want to kill this run? This will mark it as failed.")) {
+                  try {
+                    await fetch(`${API}/runs/${runId}`, {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ status: "failed", error: "Manually killed by user" }),
+                    });
+                    // Refresh run data
+                    const r = await fetch(`${API}/runs/${runId}`);
+                    if (r.ok) setRun(await r.json());
+                    setLive(false);
+                    setLiveViewUrl(null);
+                  } catch (err) {
+                    alert("Failed to kill run");
+                  }
+                }
+              }}
+              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              🛑 Kill Run
+            </button>
           </div>
         </div>
       )}

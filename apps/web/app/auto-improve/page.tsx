@@ -4,6 +4,10 @@ import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 
 const API = "/api";
+// For SSE, call server directly to avoid Next.js proxy buffering
+const SSE_API = typeof window !== "undefined" 
+  ? (process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001") + "/api"
+  : "/api";
 
 type Task = { id: string; name: string; description: string; domain: string };
 
@@ -79,7 +83,8 @@ export default function AutoImprovePage() {
     setCurrentAttempt(0);
 
     try {
-      const response = await fetch(`${API}/auto-improve`, {
+      // Use SSE_API to call server directly for streaming
+      const response = await fetch(`${SSE_API}/auto-improve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskId: selectedTask, maxAttempts }),
