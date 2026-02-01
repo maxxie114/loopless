@@ -1,0 +1,33 @@
+{
+  "name": "server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "demo:twice": "tsx src/demo-twice.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "@loopless/shared": "workspace:*",
+    "@browserbasehq/stagehand": "^3.0.0",
+    "@google/generative-ai": "^0.21.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "openai": "^4.73.0",
+    "pino": "^9.4.0",
+    "pino-pretty": "^11.3.0",
+    "redis": "^4.7.0",
+    "weave": "^0.11.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
