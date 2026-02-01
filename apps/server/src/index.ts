@@ -6,6 +6,7 @@ import cors from "cors";
 import runsRouter from "./api/runs.js";
 import tasksRouter from "./api/tasks.js";
 import autoImproveRouter from "./api/auto-improve.js";
+import evaluationsRouter from "./api/evaluations.js";
 import { config } from "./config.js";
 import { initWeave, ensureWeaveOps } from "./weave.js";
 import { getRedis, healthCheck } from "./redis.js";
@@ -30,6 +31,7 @@ app.use(express.json());
 app.use("/api/runs", runsRouter);
 app.use("/api/tasks", tasksRouter);
 app.use("/api/auto-improve", autoImproveRouter);
+app.use("/api/evaluations", evaluationsRouter);
 
 app.get("/health", async (_req, res) => {
   const redisOk = await healthCheck();

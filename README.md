@@ -7,12 +7,41 @@ A **self-improving browser agent** that becomes faster and more reliable over ti
 ## Features
 
 - **🎥 Live Browser View** - Watch the agent execute tasks in real-time via BrowserBase live streaming
+- **📹 Session Recordings** - Watch past executions permanently via BrowserBase recordings
 - **🧠 Self-Improvement Loop** - Agent learns from failures and improves prompts automatically
-- **📊 Weave Integration** - Full observability with W&B Weave tracing and LLM-as-a-Judge scoring
+- **📊 Weave Evaluation Framework** - Proper integration with Weave's built-in Evaluation class and scorers
+- **🤖 LLM-as-a-Judge** - Automated evaluation using LLM to judge task completion
 - **💾 Macro Caching** - Successful action sequences cached in Redis for reuse
 - **🔄 Loop Detection** - Automatic detection and breaking of repetitive action loops
-- **📹 Session Recordings** - Watch past runs via BrowserBase recordings
 - **🎯 AGI Inc Benchmark Tasks** - GoCalendar, GoMail, MarriSuite, NetworkIn tasks
+
+## Weave Integration
+
+This project uses W&B Weave for comprehensive observability and evaluation:
+
+### Tracing
+All agent operations are wrapped with `weave.op()` for automatic tracing:
+- `runTaskOp` - Full task execution
+- `planStepOp` - LLM planning calls
+- `executeActionOp` - Browser actions
+- `validateProgressOp` - Progress validation
+- `learnMacroOp` - Macro learning
+
+### Scorers (Proper Weave Integration)
+The following scorers are registered with Weave and results appear in the Evaluations UI:
+
+| Scorer | Description | Metrics |
+|--------|-------------|---------|
+| `taskSuccessScorer` | Did the task complete? | passed, score |
+| `efficiencyScorer` | Was the agent efficient? | steps, LLM calls, efficiency |
+| `loopDetectionScorer` | Did it avoid loops? | loopsDetected, loopsBroken |
+| `cacheUtilizationScorer` | Macro cache usage | cacheHitRate |
+| `llmJudgeScorer` | LLM-as-a-judge | verdict, reason |
+
+### API Endpoints
+- `POST /api/evaluations` - Run batch evaluation on past runs
+- `POST /api/evaluations/score/:runId` - Score a specific run
+- `GET /api/evaluations/scorers` - List available scorers
 
 ## Tech stack
 

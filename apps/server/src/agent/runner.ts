@@ -25,6 +25,7 @@ import {
   getPathname,
 } from "../page-signature.js";
 import { analyzeRun, formatLearningReport, generateImprovedPromptFromWeave } from "../evaluation/self-improve.js";
+import { scoreRunWithWeave } from "../evaluation/weave-evaluation.js";
 import type {
   RunMeta,
   RunMetrics,
@@ -550,6 +551,32 @@ export async function runTask(
   } catch (err) {
     console.warn("Self-improvement analysis failed:", err);
   }
+
+  // Weave evaluation scoring (runs in background, results appear in Weave UI)
+  scoreRunWithWeave(runId)
+    .then((weaveScores) => {
+      console.log(`[Weave] Scored run ${runId.slice(0, 8)}:`, {
+        passed: weaveScores.passed,
+        overall: weaveScores.overallScore.toFixed(2),
+        taskSuccess: weaveScores.scores.taskSuccess.passed,
+        llmJudge: weaveScores.scores.llmJudge.passed,
+      });
+      // Emit weave scores event
+      const weaveEvent = {
+        type: "weave_scored",
+        payload: {
+          run_id: runId,
+          passed: weaveScores.passed,
+          overall_score: weaveScores.overallScore,
+          scores: weaveScores.scores,
+        },
+      };
+      emit(weaveEvent);
+      appendRunEvent(runId, weaveEvent).catch(() => {});
+    })
+    .catch((err) => {
+      console.warn("[Weave] Scoring failed:", err);
+    });
 
   return {
     runId,
