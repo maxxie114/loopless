@@ -23,7 +23,7 @@ import {
   getHostname,
   getPathname,
 } from "../page-signature.js";
-import { analyzeRun, formatLearningReport } from "../evaluation/self-improve.js";
+import { analyzeRun, formatLearningReport, getFailurePatterns, generateImprovedPrompt } from "../evaluation/self-improve.js";
 import type {
   RunMeta,
   RunMetrics,
@@ -443,6 +443,11 @@ async function buildPageState(
   };
 }
 
+// Cache for improved prompt (refreshed once per run)
+let cachedImprovedPrompt: string | null = null;
+let promptCacheTime = 0;
+const PROMPT_CACHE_TTL = 60000; // 1 minute
+
 async function planStepWithLLM(
   task: Task,
   state: PageState,
@@ -455,7 +460,8 @@ async function planStepWithLLM(
     ? `\nRecent actions (DO NOT repeat these): ${recentActions.join(" → ")}`
     : "";
   
-  const systemPrompt = `You are a browser automation agent. Current task: ${task.name}. ${task.description}.
+  // Base system prompt
+  let systemPrompt = `You are a browser automation agent. Current task: ${task.name}. ${task.description}.
 Success means: ${JSON.stringify(task.success_condition)}.
 
 CRITICAL RULES:
@@ -468,6 +474,28 @@ CRITICAL RULES:
 Respond with exactly ONE natural language action for Stagehand.
 Examples: "type 'standard_user' in the username field", "type 'secret_sauce' in the password field", "click 'Login'"
 Only output the single action, no explanation.`;
+
+  // ═══════════════════════════════════════════════════════════════
+  // SELF-IMPROVEMENT: Load learned rules from past failures
+  // This is the feedback loop - we query past failures and add
+  // learned rules to the prompt
+  // ═══════════════════════════════════════════════════════════════
+  if (!cachedImprovedPrompt || Date.now() - promptCacheTime > PROMPT_CACHE_TTL) {
+    try {
+      const failurePatterns = await getFailurePatterns();
+      if (failurePatterns.length > 0) {
+        cachedImprovedPrompt = await generateImprovedPrompt(systemPrompt, failurePatterns);
+        promptCacheTime = Date.now();
+        console.log(`[Self-Improve] Loaded ${failurePatterns.length} failure patterns into prompt`);
+      } else {
+        cachedImprovedPrompt = systemPrompt;
+      }
+    } catch {
+      cachedImprovedPrompt = systemPrompt;
+    }
+  }
+  
+  systemPrompt = cachedImprovedPrompt || systemPrompt;
   
   const userPrompt = `Step ${step}. Page: ${state.title}. URL: ${state.url}.
 Actionable elements: ${state.actionable_labels.join(", ") || "unknown"}.${historyContext}
