@@ -10,7 +10,7 @@
 
 import * as weave from "weave";
 import { config } from "../config.js";
-import type { RunMeta, StepEvent } from "@loopless/shared";
+import type { StepEvent } from "@loopless/shared";
 import { getRun, getRunEvents, getRecentRunIds } from "../redis.js";
 import { getTask } from "../tasks.js";
 
@@ -220,37 +220,40 @@ export async function createWeaveEvaluation(options: {
   taskId?: string;
   limit?: number;
   includeOnlyCompleted?: boolean;
-}): Promise<weave.Evaluation<EvalDatasetRow, RunResult>> {
+}): Promise<weave.Evaluation<EvalDatasetRow, EvalDatasetRow, RunResult>> {
   const { taskId, limit = 20, includeOnlyCompleted = true } = options;
   
   // Build dataset from past runs
   const runIds = await getRecentRunIds(limit * 2);
-  const dataset: EvalDatasetRow[] = [];
+  const datasetRows: EvalDatasetRow[] = [];
   
   for (const runId of runIds) {
-    if (dataset.length >= limit) break;
+    if (datasetRows.length >= limit) break;
     
     const run = await getRun(runId);
     if (!run) continue;
     if (taskId && run.task_id !== taskId) continue;
-    if (includeOnlyCompleted && run.status !== "completed" && run.status !== "failed") continue;
+    if (includeOnlyCompleted && run.status !== "finished" && run.status !== "failed") continue;
     
     const task = getTask(run.task_id);
     if (!task) continue;
     
-    dataset.push({
+    datasetRows.push({
       id: runId,
       taskId: run.task_id,
       intent: task.intent,
       startUrl: task.start_url,
-      expectedUrl: task.validation.expected_url,
+      expectedUrl: task.success_condition.url_contains,
       maxSteps: task.max_steps,
     });
   }
   
-  if (dataset.length === 0) {
+  if (datasetRows.length === 0) {
     throw new Error("No completed runs found for evaluation");
   }
+  
+  // Create the dataset
+  const dataset = new weave.Dataset({ rows: datasetRows });
   
   // Create the evaluation with all scorers
   const evaluation = new weave.Evaluation({
@@ -286,7 +289,7 @@ export async function evaluateRun(runId: string): Promise<RunResult> {
     .filter(Boolean);
   
   return {
-    runId: run.id,
+    runId: run.run_id,
     taskId: run.task_id,
     mode: run.mode,
     success: run.metrics?.success ?? false,
@@ -320,8 +323,8 @@ export async function runWeaveEvaluation(options: {
   
   // The model function that returns the run result
   const model = weave.op(
-    async (row: EvalDatasetRow) => {
-      return evaluateRun(row.id);
+    async ({ datasetRow }: { datasetRow: EvalDatasetRow }) => {
+      return evaluateRun(datasetRow.id);
     },
     { name: "browserAgentModel" }
   );
@@ -360,7 +363,7 @@ export async function scoreRunWithWeave(runId: string): Promise<{
     taskId: run?.task_id || "",
     intent: task?.intent || "",
     startUrl: task?.start_url || "",
-    expectedUrl: task?.validation.expected_url,
+    expectedUrl: task?.success_condition.url_contains,
     maxSteps: task?.max_steps || 20,
   };
   
