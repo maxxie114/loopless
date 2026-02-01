@@ -86,6 +86,42 @@ router.get("/:run_id", async (req: Request, res: Response) => {
   res.json(run);
 });
 
+/**
+ * PATCH /api/runs/:run_id
+ * Update a run's status (e.g., to cancel/kill a stuck run)
+ */
+router.patch("/:run_id", async (req: Request, res: Response) => {
+  const { run_id } = req.params;
+  const { status, error: errorMsg } = req.body;
+  
+  const run = await getRun(run_id);
+  if (!run) {
+    res.status(404).json({ error: "Run not found" });
+    return;
+  }
+  
+  // Only allow marking as failed/cancelled
+  if (status !== "failed" && status !== "cancelled") {
+    res.status(400).json({ error: "Can only set status to 'failed' or 'cancelled'" });
+    return;
+  }
+  
+  // Update the run
+  run.status = status;
+  run.error = errorMsg || (status === "cancelled" ? "Manually cancelled by user" : "Manually marked as failed");
+  run.updated_at = new Date().toISOString();
+  
+  await setRun(run_id, run);
+  
+  // Emit event
+  emitLive(run_id, { 
+    type: status === "cancelled" ? "run_cancelled" : "run_failed", 
+    payload: { run_id, error: run.error } 
+  });
+  
+  res.json({ success: true, run });
+});
+
 router.get("/:run_id/events", async (req: Request, res: Response) => {
   const { run_id } = req.params;
   res.setHeader("Content-Type", "text/event-stream");

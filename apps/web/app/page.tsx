@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 const API = "/api";
 
@@ -11,6 +12,7 @@ type RunMeta = {
   task_id: string;
   mode: string;
   status: string;
+  created_at?: string;
   metrics?: {
     success: boolean;
     wall_time_ms: number;
@@ -26,6 +28,7 @@ type RunMeta = {
 };
 
 export default function Home() {
+  const router = useRouter();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedTask, setSelectedTask] = useState<string>("saucedemo-checkout");
   const [runs, setRuns] = useState<RunMeta[]>([]);
@@ -44,7 +47,19 @@ export default function Home() {
     const fetchRuns = () => {
       fetch(`${API}/runs`)
         .then((r) => r.json())
-        .then((list) => Array.isArray(list) ? setRuns(list) : setRuns([]))
+        .then((list) => {
+          if (Array.isArray(list)) {
+            // Sort by created_at descending (newest first)
+            const sorted = list.sort((a: RunMeta, b: RunMeta) => {
+              const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
+              const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
+              return dateB - dateA;
+            });
+            setRuns(sorted);
+          } else {
+            setRuns([]);
+          }
+        })
         .catch(() => setRuns([]));
     };
     fetchRuns();
@@ -63,14 +78,12 @@ export default function Home() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to start run");
-      if (data.cold_run_id) {
-        setRuns((prev) => [...prev, { run_id: data.cold_run_id, task_id: selectedTask, mode: "cold", status: "running" }, { run_id: data.warm_run_id, task_id: selectedTask, mode: "warm", status: "pending" }]);
-      } else {
-        setRuns((prev) => [{ run_id: data.run_id, task_id: selectedTask, mode, status: "running" }, ...prev]);
-      }
+      
+      // Navigate to the run details page immediately
+      const runIdToView = data.cold_run_id || data.run_id;
+      router.push(`/runs/${runIdToView}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Error");
-    } finally {
       setLoading(null);
     }
   }
@@ -148,14 +161,14 @@ export default function Home() {
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-[var(--muted)] border-b border-[var(--border)]">
+                <th className="pb-2 font-medium">Time</th>
                 <th className="pb-2 font-medium">Run ID</th>
                 <th className="pb-2 font-medium">Mode</th>
                 <th className="pb-2 font-medium">Result</th>
                 <th className="pb-2 font-medium">Steps</th>
-                <th className="pb-2 font-medium">LLM Calls</th>
+                <th className="pb-2 font-medium">LLM</th>
                 <th className="pb-2 font-medium">Cache</th>
                 <th className="pb-2 font-medium">Loops</th>
-                <th className="pb-2 font-medium">Recording</th>
                 <th className="pb-2 font-medium"></th>
               </tr>
             </thead>
@@ -167,6 +180,9 @@ export default function Home() {
               )}
               {runs.slice(0, 20).map((run) => (
                 <tr key={run.run_id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg)]/50">
+                  <td className="py-3 text-xs text-[var(--muted)]">
+                    {run.created_at ? new Date(run.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "-"}
+                  </td>
                   <td className="py-3 font-mono text-xs text-[var(--muted)]">{run.run_id.slice(0, 8)}</td>
                   <td className="py-3">
                     <span className={`px-2 py-0.5 rounded text-xs ${run.mode === "cold" ? "bg-blue-500/20 text-blue-400" : "bg-orange-500/20 text-orange-400"}`}>
@@ -188,20 +204,6 @@ export default function Home() {
                       <span className="text-yellow-400">{run.metrics.num_loop_detected}</span>
                     ) : (
                       <span className="text-[var(--muted)]">0</span>
-                    )}
-                  </td>
-                  <td className="py-3">
-                    {run.metrics?.recording_url ? (
-                      <a
-                        href={run.metrics.recording_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-[var(--accent)] hover:underline"
-                      >
-                        🎬 Watch
-                      </a>
-                    ) : (
-                      <span className="text-[var(--muted)]">-</span>
                     )}
                   </td>
                   <td className="py-3">

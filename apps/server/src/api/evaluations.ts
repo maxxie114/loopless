@@ -123,10 +123,10 @@ router.get("/dataset", async (req, res) => {
   const limit = parseInt(req.query.limit as string) || 20;
 
   try {
-    const evaluation = await createWeaveEvaluation({ taskId, limit, includeOnlyCompleted: true });
+    // Create evaluation (we don't use the result directly, just verify it works)
+    await createWeaveEvaluation({ taskId, limit, includeOnlyCompleted: true });
     
-    // The dataset is accessible via the evaluation object
-    // For now, return info about what would be evaluated
+    // Return info about what would be evaluated
     res.json({
       message: "Dataset created from past runs",
       taskFilter: taskId || "all",
