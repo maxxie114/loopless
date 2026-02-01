@@ -1,2 +1,2 @@
-# self_improved_browser
+# loopless
 This is an auto improvement browser use agent using weave and browserBase
