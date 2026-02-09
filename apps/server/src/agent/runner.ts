@@ -318,37 +318,34 @@ export async function runTask(
       const loopCount = signatureHistory.filter((s) => s === pageSig).length;
       const inLoopState = isRepeating || loopCount >= 2;
       
-      // Try to use macro, but validate it makes sense for current page
-      const macro = (useMacros && !inLoopState)
-        ? await getMacro(task.domain, task.intent, pageSig)
-        : null;
+      // Try to use macro - DISABLED for now due to incorrect page signature matching
+      // The page signature doesn't capture form state, causing wrong macros to be applied
+      // For example: login page signature is same whether form is empty or filled
+      const macro = null; // (useMacros && !inLoopState) ? await getMacro(task.domain, task.intent, pageSig) : null;
       
-      // Validate macro action is relevant to current page elements
+      // Strict macro validation - only use if action makes sense for current context
       let macroValid = false;
       if (macro && macro.actions.length > 0) {
         const macroAction = macro.actions[0].toLowerCase();
-        const pageElements = state.actionable_labels.map(l => l.toLowerCase()).join(" ");
+        const currentUrl = page.url().toLowerCase();
         
-        // Check if the macro action mentions elements that exist on the page
-        // or is a generic action that should work
-        const genericActions = ["click", "scroll", "wait", "navigate", "go"];
-        const isGenericAction = genericActions.some(g => macroAction.startsWith(g));
-        const mentionsPageElement = state.actionable_labels.some(label => 
-          macroAction.includes(label.toLowerCase().slice(0, 10)) ||
-          label.toLowerCase().includes(macroAction.split(" ").slice(-1)[0]?.slice(0, 8) || "")
-        );
+        // Only use macro if action matches current page context
+        // Login page actions should only be used on login page
+        const isLoginPage = currentUrl.includes('saucedemo.com') && !currentUrl.includes('inventory');
+        const isInventoryPage = currentUrl.includes('inventory');
+        const isCartPage = currentUrl.includes('cart');
         
-        // For form actions, check if the form fields exist
-        const isFormAction = macroAction.includes("type") || macroAction.includes("fill") || macroAction.includes("enter");
-        const formFieldMentioned = isFormAction && (
-          macroAction.includes("username") && pageElements.includes("user") ||
-          macroAction.includes("password") && pageElements.includes("pass") ||
-          macroAction.includes("first") && pageElements.includes("first") ||
-          macroAction.includes("last") && pageElements.includes("last") ||
-          macroAction.includes("zip") && pageElements.includes("zip")
-        );
+        const isLoginAction = macroAction.includes('login') || macroAction.includes('username') || macroAction.includes('password');
+        const isInventoryAction = macroAction.includes('cart') || macroAction.includes('add to cart');
+        const isCartAction = macroAction.includes('checkout');
         
-        macroValid = isGenericAction || mentionsPageElement || formFieldMentioned || !isFormAction;
+        macroValid = (isLoginPage && isLoginAction) ||
+                     (isInventoryPage && isInventoryAction) ||
+                     (isCartPage && isCartAction);
+        
+        if (step < 5) {
+          console.log(`[Agent] Macro check (step ${step}): action="${macroAction.slice(0, 40)}..." valid=${macroValid} url=${currentUrl.slice(0, 50)}`);
+        }
       }
       
       if (macro && macro.actions.length > 0 && macroValid) {
@@ -358,10 +355,10 @@ export async function runTask(
           source: "macro",
         };
         metrics.cache_hits++;
+        console.log(`[Agent] ✅ Using cached macro (step ${step}): ${action.action.slice(0, 50)}`);
       } else {
         if (macro && !macroValid) {
-          // Macro exists but isn't valid for current page state
-          console.log(`[Agent] Skipping invalid macro for page state: ${macro.actions[0]?.slice(0, 50)}`);
+          console.log(`[Agent] ⚠️ Skipping invalid macro for this context: ${macro.actions[0]?.slice(0, 50)}`);
         }
         metrics.cache_misses++;
         const llmStart = Date.now();

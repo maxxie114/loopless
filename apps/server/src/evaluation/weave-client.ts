@@ -1,12 +1,8 @@
 /**
  * Weave API Client - Query evaluations and feedback directly from Weave
  * 
- * This module provides direct access to Weave's API to:
- * 1. Query past run traces
- * 2. Get evaluation feedback and scores
- * 3. Retrieve LLM judge results
- * 
  * API Reference: https://docs.wandb.ai/weave/reference/service-api/calls/
+ * Service API Guide: https://docs.wandb.ai/weave/cookbooks/weave_via_service_api
  */
 
 import { config } from "../config.js";
@@ -33,7 +29,6 @@ interface WeaveFeedback {
   feedback_type: string;
   payload: Record<string, unknown>;
   note?: string;
-  // For LLM judge results
   runnable_ref?: string;
   output?: {
     passed?: boolean;
@@ -42,27 +37,11 @@ interface WeaveFeedback {
   };
 }
 
-interface CallsQueryRequest {
-  project_id: string;
-  filter?: {
-    op_names?: string[];
-    trace_ids?: string[];
-    input_refs?: string[];
-    call_ids?: string[];
-  };
-  limit?: number;
-  offset?: number;
-  sort_by?: Array<{ field: string; direction: "asc" | "desc" }>;
-  include_feedback?: boolean;
-  columns?: string[];
-}
-
-interface CallsQueryResponse {
-  calls: WeaveCall[];
-}
-
 /**
  * WeaveAPIClient - Direct access to Weave's query API
+ * 
+ * Note: Uses the Service API endpoint /calls/stream_query which returns JSONL
+ * Reference: https://docs.wandb.ai/weave/cookbooks/weave_via_service_api
  */
 export class WeaveAPIClient {
   private apiKey: string;
@@ -70,12 +49,14 @@ export class WeaveAPIClient {
 
   constructor() {
     this.apiKey = config.WANDB_API_KEY || "";
-    // Format: entity/project
+    // Format: team/project as shown in docs
+    // Example from docs: f"{team_id}/{project_id}"
     this.projectId = config.WEAVE_PROJECT || "loopless";
   }
 
   /**
-   * Query calls from Weave with filters
+   * Query calls from Weave using stream_query endpoint
+   * Returns JSONL (newline-delimited JSON) format
    */
   async queryCalls(options: {
     opNames?: string[];
@@ -88,21 +69,34 @@ export class WeaveAPIClient {
     }
 
     try {
-      const request: CallsQueryRequest = {
+      // Use stream_query endpoint as documented
+      // https://docs.wandb.ai/weave/reference/service-api/calls/calls-query-stream
+      const requestBody: Record<string, unknown> = {
         project_id: this.projectId,
-        filter: options.opNames ? { op_names: options.opNames } : undefined,
         limit: options.limit || 50,
         include_feedback: options.includeFeedback ?? true,
         sort_by: [{ field: "started_at", direction: "desc" }],
       };
 
-      const response = await fetch(`${WEAVE_API_BASE}/calls/query`, {
+      // Add op_names filter if specified
+      if (options.opNames && options.opNames.length > 0) {
+        requestBody.filter = { op_names: options.opNames };
+      }
+
+      console.log("[WeaveClient] Querying:", {
+        project_id: this.projectId,
+        limit: requestBody.limit,
+        filter: requestBody.filter,
+      });
+
+      const response = await fetch(`${WEAVE_API_BASE}/calls/stream_query`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Accept": "application/jsonl",
           Authorization: `Basic ${Buffer.from(`api:${this.apiKey}`).toString("base64")}`,
         },
-        body: JSON.stringify(request),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -111,8 +105,21 @@ export class WeaveAPIClient {
         return [];
       }
 
-      const data = (await response.json()) as CallsQueryResponse;
-      return data.calls || [];
+      // Parse JSONL response (newline-delimited JSON)
+      const text = await response.text();
+      const calls: WeaveCall[] = [];
+      
+      for (const line of text.split("\n").filter(l => l.trim())) {
+        try {
+          const call = JSON.parse(line) as WeaveCall;
+          calls.push(call);
+        } catch (e) {
+          // Skip invalid lines
+        }
+      }
+
+      console.log(`[WeaveClient] Retrieved ${calls.length} calls`);
+      return calls;
     } catch (err) {
       console.warn("[WeaveClient] Query error:", err);
       return [];
@@ -121,16 +128,38 @@ export class WeaveAPIClient {
 
   /**
    * Get evaluation results from Weave
-   * Looks for browserAgentEvaluation ops and their feedback
+   * Looks for evaluation-related ops
    */
   async getEvaluationResults(limit: number = 30): Promise<EvaluationResult[]> {
+    // Query without op name filter first to see what's available
     const calls = await this.queryCalls({
-      opNames: ["browserAgentEvaluation", "score_task_success", "overallScorer"],
       limit,
       includeFeedback: true,
     });
 
-    return calls.map(call => this.parseEvaluationCall(call)).filter(Boolean) as EvaluationResult[];
+    if (calls.length === 0) {
+      console.log("[WeaveClient] No calls found in project");
+      return [];
+    }
+
+    // Log available op names for debugging
+    const opNames = new Set(calls.map(c => c.op_name));
+    console.log("[WeaveClient] Available op names:", Array.from(opNames).slice(0, 10));
+
+    // Filter for evaluation-related ops
+    const evalCalls = calls.filter(call => {
+      const opName = call.op_name?.toLowerCase() || "";
+      return opName.includes("eval") || 
+             opName.includes("browseragent") || 
+             opName.includes("score") ||
+             opName.includes("selfimprove") ||
+             opName.includes("runtask") ||
+             opName.includes("planstep");
+    });
+
+    console.log(`[WeaveClient] Found ${evalCalls.length} evaluation-related calls`);
+    
+    return evalCalls.map(call => this.parseEvaluationCall(call)).filter(Boolean) as EvaluationResult[];
   }
 
   /**
@@ -140,6 +169,10 @@ export class WeaveAPIClient {
   async getFailureAnalysis(taskId?: string): Promise<FailureAnalysis> {
     const evaluations = await this.getEvaluationResults(50);
     
+    if (evaluations.length === 0) {
+      console.log("[WeaveClient] No evaluations found - self-improvement will use base prompt");
+    }
+
     // Filter by task if specified
     const filtered = taskId 
       ? evaluations.filter(e => e.taskId === taskId)
@@ -193,19 +226,21 @@ export class WeaveAPIClient {
   async getLLMJudgeFeedback(taskId?: string): Promise<LLMJudgeFeedback[]> {
     // Query for LLM judge evaluation calls
     const calls = await this.queryCalls({
-      opNames: [
-        "llm_judge_eval",
-        "llmJudgeEvaluation", 
-        "LLMJudgeScorer",
-        "eval_llm_response",
-      ],
       limit: 30,
       includeFeedback: true,
     });
 
+    // Filter for LLM judge related ops
+    const judgeCalls = calls.filter(call => {
+      const opName = call.op_name?.toLowerCase() || "";
+      return opName.includes("judge") || 
+             opName.includes("llmjudge") ||
+             opName.includes("eval_llm");
+    });
+
     const feedback: LLMJudgeFeedback[] = [];
 
-    for (const call of calls) {
+    for (const call of judgeCalls) {
       // Extract task ID from inputs
       const callTaskId = (call.inputs as { taskId?: string; task_id?: string })?.taskId 
         || (call.inputs as { taskId?: string; task_id?: string })?.task_id;
