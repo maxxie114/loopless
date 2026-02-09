@@ -3,7 +3,7 @@
  * Usage: pnpm run demo:twice
  */
 import "dotenv/config";
-import { runTask } from "./agent/runner.js";
+import { runTask } from "./agent/index.js";
 import { getRun } from "./redis.js";
 import { initWeave } from "./weave.js";
 import { getRedis } from "./redis.js";

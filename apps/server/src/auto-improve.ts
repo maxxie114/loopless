@@ -10,7 +10,7 @@
  * The UI can stream progress in real-time via SSE.
  */
 
-import { runTask } from "./agent/runner.js";
+import { runTask } from "./agent/index.js";
 import { analyzeRun, clearFeedbackCache } from "./evaluation/self-improve.js";
 import { evaluateWithLLMJudge } from "./evaluation/llm-judge.js";
 import { getRun, getRunEvents, getRedis } from "./redis.js";
