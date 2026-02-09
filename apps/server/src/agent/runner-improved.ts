@@ -12,8 +12,6 @@ import OpenAI from "openai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { config } from "../config.js";
 import {
-  getMacro,
-  setMacro,
   setRun,
   appendRunEvent,
   getRun,
@@ -24,7 +22,6 @@ import {
   planStepWeave,
   executeActionWeave,
   validateProgressWeave,
-  learnMacroWeave,
 } from "../weave.js";
 import { getTask } from "../tasks.js";
 import {
@@ -41,15 +38,12 @@ import {
 import {
   evaluateAction,
   evaluateRun,
-  evaluateStepProgress,
   generateImprovedPrompt,
-  type JudgeResult,
 } from "../evaluation/llm-judge-improved.js";
 import type {
   RunMeta,
   RunMetrics,
   RunMode,
-  Macro,
   Task,
   PageState,
   PlannedAction,
@@ -550,8 +544,16 @@ async function buildImprovedPrompt(task: Task, mode: RunMode): Promise<string> {
   const taskFeedback = feedbackStore.filter(f => f.taskId === task.id);
   if (taskFeedback.length === 0) return basePrompt;
   
+  // Map to expected format
+  const mappedFeedback = taskFeedback.slice(-5).map(f => ({
+    taskDescription: task.description,
+    wrongAction: f.wrongAction,
+    correctAction: f.correctAction,
+    context: f.context,
+  }));
+  
   // Generate improved prompt
-  const improved = await generateImprovedPrompt(basePrompt, taskFeedback.slice(-5));
+  const improved = await generateImprovedPrompt(basePrompt, mappedFeedback);
   
   if (improved !== basePrompt) {
     console.log(`[Self-Improve] ✅ Injected ${taskFeedback.length} feedback items into prompt`);
@@ -594,7 +596,7 @@ Only output the action, no explanation.`;
 
 // Helper: Plan step with LLM
 async function planStepWithLLM(
-  task: Task,
+  _task: Task,
   state: PageState,
   step: number,
   actionHistory: string[],
