@@ -11,7 +11,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import OpenAI from "openai";
 import { config } from "../config.js";
-import type { RunMeta, StepEvent } from "@loopless/shared";
+import type { StepEvent } from "@loopless/shared";
 
 // Lazy-init LLM clients
 let _openai: OpenAI | null = null;

@@ -4,7 +4,7 @@
  * Runs cold then warm for each task and compares performance
  */
 
-import { runTask } from "../apps/server/src/agent/runner-improved.js";
+import { runTask } from "../apps/server/src/agent/index.js";
 import { listTasks } from "../apps/server/src/tasks.js";
 import { config } from "../apps/server/src/config.js";
 

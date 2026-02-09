@@ -1,167 +1,232 @@
-# LoopLess
+# LoopLess - Self-Improving Browser Agent
 
-A **self-improving browser agent** that becomes faster and more reliable over time by learning loop-breaking, DOM-first “macro” behaviors with **Redis**, and proving improvements with **W&B Weave** evals and traces. Built with **BrowserBase** and **Stagehand**.
+[![Demo Video](https://img.youtube.com/vi/KKCXkOnlggY/0.jpg)](https://youtu.be/KKCXkOnlggY?si=5NBKsZOc_Czk9Qby)
 
-**Tagline:** Cold run learns. Warm run reuses cached macros and finishes with fewer LLM calls, fewer steps, and less time.
+**🎥 Watch the Demo:** [YouTube - LoopLess Demo](https://youtu.be/KKCXkOnlggY?si=5NBKsZOc_Czk9Qby)
 
-## Features
+---
+
+A **self-improving browser agent** that becomes faster and more reliable over time by learning loop-breaking, DOM-first "macro" behaviors with **Redis**, and proving improvements with **W&B Weave** evals and traces. Built with **Google Gemini 3 Flash Preview**, **BrowserBase**, and **Stagehand**.
+
+**Tagline:** *Cold run learns. Warm run reuses cached macros and finishes with fewer LLM calls, fewer steps, and less time.*
+
+## 🎯 What It Does
+
+LoopLess is an autonomous browser automation agent that:
+1. **Executes complex web tasks** (checkout, calendar events, email management)
+2. **Learns from experience** - caches successful action sequences as "macros"
+3. **Self-improves** - uses LLM-as-a-Judge to evaluate and refine its behavior
+4. **Gets faster over time** - warm runs use cached knowledge to reduce LLM calls by 45%
+
+## ✨ Key Features
 
 - **🎥 Live Browser View** - Watch the agent execute tasks in real-time via BrowserBase live streaming
 - **📹 Session Recordings** - Watch past executions permanently via BrowserBase recordings
-- **🧠 Self-Improvement Loop** - Agent learns from failures and improves prompts automatically
+- **🧠 Self-Improvement Loop** - Agent learns from failures and improves prompts automatically using Gemini
 - **📊 Weave Evaluation Framework** - Proper integration with Weave's built-in Evaluation class and scorers
-- **🤖 LLM-as-a-Judge** - Automated evaluation using LLM to judge task completion
-- **💾 Macro Caching** - Successful action sequences cached in Redis for reuse
+- **🤖 LLM-as-a-Judge** - Uses Gemini 3 Flash Preview to evaluate task completion and macro validity
+- **💾 Sequence-Aware Macro Caching** - Contextual action sequences cached in Redis for intelligent reuse
 - **🔄 Loop Detection** - Automatic detection and breaking of repetitive action loops
 - **🎯 AGI Inc Benchmark Tasks** - GoCalendar, GoMail, MarriSuite, NetworkIn tasks
 
-## Weave Integration
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        LoopLess Agent                           │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
+│  │  Cold Run    │→│  LLM Judge   │→│  Warm Run    │         │
+│  │  (Learning)  │  │  (Evaluate)  │  │  (Optimized) │         │
+│  └──────────────┘  └──────────────┘  └──────────────┘         │
+│         ↓                  ↓                  ↓                │
+│  ┌──────────────────────────────────────────────────────┐     │
+│  │         Gemini 3 Flash Preview (Agent Brain)         │     │
+│  │  - Action Planning  - Macro Validation  - Judging    │     │
+│  └──────────────────────────────────────────────────────┘     │
+│         ↓                  ↓                  ↓                │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
+│  │  BrowserBase │  │     Redis    │  │  W&B Weave   │         │
+│  │  (Browser)   │  │   (Cache)    │  │ (Analytics)  │         │
+│  └──────────────┘  └──────────────┘  └──────────────┘         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## 🚀 Quick Start
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/yourusername/loopless.git
+cd loopless
+pnpm install
+```
+
+### 2. Environment Setup
+
+Copy `.env.example` to `.env` and configure:
+
+```bash
+# Required: Google Gemini (Primary LLM)
+GOOGLE_API_KEY=your_gemini_api_key
+LLM_PROVIDER=google
+LLM_MODEL=gemini-3-flash-preview
+
+# Required: W&B Weave (Observability & Evaluation)
+WANDB_API_KEY=your_wandb_api_key
+WEAVE_PROJECT=your-entity/weavehacks/loopless
+
+# Required: BrowserBase (Browser Automation)
+BROWSERBASE_API_KEY=your_browserbase_key
+BROWSERBASE_PROJECT_ID=your_project_id
+
+# Required: Redis (Macro Cache)
+REDIS_URL=redis://localhost:6379
+# Or use Redis Cloud: rediss://default:pass@host:port
+```
+
+### 3. Run Redis (local)
+
+```bash
+docker run -d -p 6379:6379 redis:7-alpine
+```
+
+### 4. Build and Start
+
+```bash
+# Build shared package
+pnpm --filter @loopless/shared build
+
+# Start both server and web UI
+pnpm dev
+```
+
+- **Server:** http://localhost:3001  
+- **Web UI:** http://localhost:3000
+
+### 5. Run Demo (Cold vs Warm)
+
+```bash
+# This will run SauceDemo checkout twice:
+# - Cold: No prior knowledge (baseline)
+# - Warm: With learned macros (optimized)
+pnpm run demo:twice
+```
+
+**Expected Results:**
+| Metric | Cold Run | Warm Run | Improvement |
+|--------|----------|----------|-------------|
+| Time | ~180s | ~140s | **-22%** |
+| LLM Calls | 11 | ~6 | **-45%** |
+| Cache Hits | 0 | 4-5 | New! |
+
+## 📊 Weave Integration
 
 This project uses W&B Weave for comprehensive observability and evaluation:
 
 ### Tracing
-All agent operations are wrapped with `weave.op()` for automatic tracing:
+All agent operations are automatically traced:
 - `runTaskOp` - Full task execution
 - `planStepOp` - LLM planning calls
 - `executeActionOp` - Browser actions
 - `validateProgressOp` - Progress validation
 - `learnMacroOp` - Macro learning
 
-### Scorers (Proper Weave Integration)
-The following scorers are registered with Weave and results appear in the Evaluations UI:
-
+### Scorers
 | Scorer | Description | Metrics |
 |--------|-------------|---------|
 | `taskSuccessScorer` | Did the task complete? | passed, score |
-| `efficiencyScorer` | Was the agent efficient? | steps, LLM calls, efficiency |
-| `loopDetectionScorer` | Did it avoid loops? | loopsDetected, loopsBroken |
+| `efficiencyScorer` | Was the agent efficient? | steps, LLM calls |
+| `loopDetectionScorer` | Did it avoid loops? | loopsDetected |
 | `cacheUtilizationScorer` | Macro cache usage | cacheHitRate |
-| `llmJudgeScorer` | LLM-as-a-judge | verdict, reason |
+| `llmJudgeScorer` | Gemini-as-a-judge | verdict, reason |
 
-### API Endpoints
-- `POST /api/evaluations` - Run batch evaluation on past runs
-- `POST /api/evaluations/score/:runId` - Score a specific run
-- `GET /api/evaluations/scorers` - List available scorers
+## 🧪 Benchmark Tasks
 
-## Tech stack
+LoopLess includes 16 benchmark tasks across 4 AGI Inc domains:
 
-- **Backend:** Node.js 18+, Express, Weave TS SDK, OpenAI SDK, Redis (node-redis), Zod, Pino
-- **Browser automation:** Stagehand, Browserbase (sessions + recordings)
-- **Frontend:** Next.js 14 (App Router), Tailwind CSS
-- **Storage:** Redis (macros, run metadata, events)
+| Domain | Tasks |
+|--------|-------|
+| **GoCalendar** | Create event, Edit event, Recurring event, Weekday event |
+| **GoMail** | Count unread, Compose email, Delete email, Archive email |
+| **MarriSuite** | Book room, Search hotels, Filter results, View reservation |
+| **NetworkIn** | View profile, Send message, Search jobs, Update profile |
 
-## Quick start
+## 💻 Tech Stack
 
-### 1. Clone and install
+- **LLM:** Google Gemini 3 Flash Preview (via Google AI SDK)
+- **Backend:** Node.js 20+, Express, TypeScript
+- **Observability:** W&B Weave (Tracing & Evaluations)
+- **Browser:** Stagehand + BrowserBase (sessions + recordings)
+- **Frontend:** Next.js 14, Tailwind CSS
+- **Cache:** Redis (macros, run metadata)
+- **Package Manager:** pnpm workspaces
 
-```bash
-cd self_improved_browser
-pnpm install
-```
-
-### 2. Environment
-
-Copy `.env.example` to `.env` and set:
-
-- **W&B Weave:** `WANDB_API_KEY`, `WEAVE_PROJECT` (e.g. `your-entity/loopless`)
-- **LLM:** `OPENAI_API_KEY`, `LLM_MODEL` (e.g. `gpt-4o-mini`)
-- **Browserbase:** `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID`
-- **Redis:** `REDIS_URL` (e.g. `redis://localhost:6379`)
-
-### 3. Run Redis (local)
-
-```bash
-# Docker
-docker run -d -p 6379:6379 redis:7-alpine
-```
-
-### 4. Build shared package and start server + web
-
-```bash
-pnpm --filter @loopless/shared build
-pnpm dev
-```
-
-- **Server:** http://localhost:3001  
-- **Web UI:** http://localhost:3000  
-
-Or run separately:
-
-```bash
-pnpm dev:server   # backend only
-pnpm dev:web      # frontend only (proxies /api to 3001)
-```
-
-### 5. Demo: Run Twice (CLI)
-
-```bash
-pnpm run demo:twice
-```
-
-Runs SauceDemo checkout **cold** (no macros), then **warm** (with cached macros). Compare metrics: warm should have more cache hits and fewer LLM calls / less time.
-
-## Project layout
+## 📁 Project Structure
 
 ```
-self_improved_browser/
-  apps/
-    server/          # Express API + agent runner (Stagehand, Weave, Redis)
-    web/              # Next.js UI (task picker, runs, SSE events)
-  packages/
-    shared/           # Zod schemas, types
-  scripts/
-    seed_tasks.ts     # List/validate tasks
-    run_eval.ts       # Eval harness (Weave Evaluations)
-  AGENT.md            # Full spec
-  .env.example
+loopless/
+├── apps/
+│   ├── server/          # Express API + Agent Runner
+│   │   ├── src/
+│   │   │   ├── agent/          # Agent logic & runner
+│   │   │   ├── macro-sequence.ts  # NEW: Sequence-aware caching
+│   │   │   ├── evaluation/     # LLM-as-a-Judge
+│   │   │   └── api/            # REST API routes
+│   │   └── Dockerfile
+│   └── web/             # Next.js UI
+├── packages/
+│   └── shared/          # Zod schemas, types
+├── scripts/
+│   └── test-all-tasks.ts  # Benchmark runner
+├── README.md
+└── IMPROVEMENTS.md      # Technical deep-dive
 ```
 
-## API
+## 🌐 API Endpoints
 
-- `POST /api/runs` — Start a run. Body: `{ task_id, mode: "cold"|"warm"|"twice" }`. Returns `{ run_id }` or `{ cold_run_id, warm_run_id }`.
-- `GET /api/runs` — List recent runs.
-- `GET /api/runs/:id` — Run metadata and metrics.
-- `GET /api/runs/:id/events` — SSE stream of step events.
-- `GET /api/tasks` — List tasks.
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/runs` | Start a run (cold/warm/twice) |
+| `GET /api/runs` | List recent runs |
+| `GET /api/runs/:id` | Run metadata and metrics |
+| `GET /api/runs/:id/events` | SSE stream of step events |
+| `GET /api/tasks` | List available tasks |
 
-## Success metrics (per run)
+## 📈 Success Metrics
 
-- **success**, **wall_time_ms**, **num_steps**, **num_llm_calls**, **num_observe_calls**
-- **cache_hits** / **cache_misses** (macros)
-- **num_loop_detected**, **num_loop_broken**
-- **recording_url** (Browserbase session)
+A successful warm run shows:
+- **≥30% fewer LLM calls** vs cold run
+- **≥20% faster wall time** vs cold run
+- **Higher cache hit rate** on repeated workflows
+- **Same or better success rate**
 
-Warm run should show **≥30% fewer LLM calls** or **≥20% faster wall time** vs cold on the same task.
+## 🚢 Deployment
 
-## Deployment
-
-### Deploy Frontend to Vercel
-
-1. Connect your GitHub repo to Vercel
+### Frontend (Vercel)
+1. Connect GitHub repo to Vercel
 2. Set root directory to `apps/web`
-3. Add environment variable: `NEXT_PUBLIC_API_URL=<your-server-url>`
+3. Add env: `NEXT_PUBLIC_API_URL=<server-url>`
 4. Deploy
 
-### Deploy Server to Railway/Render
+### Backend (Railway/Render)
+1. Use `apps/server/Dockerfile`
+2. Set env vars (see Quick Start)
+3. Deploy and update Vercel with server URL
 
-1. Use the Dockerfile at `apps/server/Dockerfile`
-2. Set required environment variables:
-   - `WANDB_API_KEY` - W&B Weave API key
-   - `GOOGLE_API_KEY` - Gemini API key
-   - `BROWSERBASE_API_KEY` - BrowserBase API key
-   - `BROWSERBASE_PROJECT_ID` - BrowserBase project ID
-   - `REDIS_URL` - Redis Cloud connection string
-   - `REDIS_PASSWORD` - Redis password
-3. Deploy and note the server URL
-4. Update Vercel's `NEXT_PUBLIC_API_URL` with the server URL
+## 📚 Documentation
 
-## Docs
+- [W&B Weave Documentation](https://docs.wandb.ai/weave/quickstart)
+- [Gemini API Documentation](https://ai.google.dev/docs)
+- [BrowserBase Documentation](https://docs.browserbase.com/)
+- [Stagehand Documentation](https://docs.stagehand.dev/)
 
-- [W&B Weave (TS)](https://docs.wandb.ai/weave/quickstart) · [Weave Evaluations](https://docs.wandb.ai/weave/tutorial-eval)
-- [Browserbase](https://docs.browserbase.com/introduction/getting-started) · [Stagehand](https://docs.stagehand.dev/v3/first-steps/quickstart)
-- [BrowserBase Live View](https://docs.browserbase.com/features/session-live-view)
-- [Redis node-redis](https://redis.io/docs/latest/develop/clients/nodejs/)
-
-## License
+## 📜 License
 
 See [LICENSE](LICENSE).
+
+---
+
+**Built with ❤️ for the Gemini 3 Hackathon**
+
+*Powered by Google Gemini 3 Flash Preview, W&B Weave, and BrowserBase*
