@@ -76,10 +76,14 @@ export async function fetchWeaveFeedback(taskId?: string): Promise<FailureAnalys
   const cacheKey = taskId || "all";
   if (Date.now() - lastFeedbackFetch < FEEDBACK_CACHE_TTL) {
     const cached = feedbackCache.get(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      console.log(`[Self-Improve] Using cached feedback (${cacheKey})`);
+      return cached;
+    }
   }
 
   try {
+    console.log(`[Self-Improve] Fetching feedback from Weave for ${taskId || "all tasks"}...`);
     const weaveClient = getWeaveClient();
     const analysis = await weaveClient.getFailureAnalysis(taskId);
     
@@ -87,17 +91,17 @@ export async function fetchWeaveFeedback(taskId?: string): Promise<FailureAnalys
     feedbackCache.set(cacheKey, analysis);
     lastFeedbackFetch = Date.now();
     
-    console.log(`[Weave] Fetched failure analysis for ${taskId || "all tasks"}:`, {
+    console.log(`[Self-Improve] ✅ Fetched failure analysis:`, {
       totalRuns: analysis.totalRuns,
       failedRuns: analysis.failedRuns,
       successRate: `${(analysis.successRate * 100).toFixed(1)}%`,
       commonIssues: analysis.commonIssues.length,
-      llmFeedback: analysis.llmJudgeFeedback.length,
+      recommendations: analysis.recommendations.length,
     });
     
     return analysis;
   } catch (err) {
-    console.warn("[Weave] Failed to fetch feedback:", err);
+    console.warn("[Self-Improve] ❌ Failed to fetch Weave feedback:", err);
     
     // Fall back to Redis if Weave API fails
     return fallbackToRedisFeedback(taskId);
