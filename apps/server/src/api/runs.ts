@@ -1,7 +1,7 @@
 import express, { type Request, type Response } from "express";
 import { CreateRunSchema } from "@loopless/shared";
 import { getRun, getRunEvents, getRecentRunIds, setRun } from "../redis.js";
-import { runTask } from "../agent/runner.js";
+import { runTask } from "../agent/index.js";
 import { getTask } from "../tasks.js";
 import { emit as emitLive } from "../run-emitter.js";
 import { randomUUID } from "crypto";
